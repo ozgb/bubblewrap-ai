@@ -158,5 +158,60 @@ Example `~/.bwai.json`:
 | `home_allow` | Dotfiles/dirs in `$HOME` the agent may read and write | see above |
 | `home_block` | Dotfiles/dirs in `$HOME` that are never exposed | see above |
 | `env_allow` | Environment variables from the host passed into the sandbox | see above |
+| `broker` | Host-execution broker for letting specific commands escape the sandbox with user approval. See below. | disabled |
 
 `home_allow` takes precedence over `home_block`.
+
+## Host-execution broker (experimental)
+
+Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — `git commit -S` needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`. The broker lets specific argv lists escape to the host with per-command rules.
+
+Enable it by adding a `broker` block to `~/.bwai.json`:
+
+```json
+{
+  "broker": {
+    "enabled": true,
+    "approval_timeout_s": 120,
+    "rules": [
+      { "match": ["git", "status"],                 "action": "auto_allow" },
+      { "match": ["git", "commit", "-S", "-m", "fix"], "action": "confirm" }
+    ]
+  }
+}
+```
+
+Rules in this release match argv **literally** — no `*` / `**` wildcards yet. Each token must equal the corresponding sandbox argv exactly. Anything not matched by a rule is denied.
+
+Three actions:
+
+- `auto_allow` — runs immediately on the host.
+- `confirm` — runs only after explicit approval from a second terminal.
+- `auto_deny` — explicit reject (use to carve exceptions out of broader rules in a later release).
+
+Inside the sandbox, the agent invokes `bwai-outside` instead of the bare command:
+
+```sh
+bwai-outside git commit -S -m "fix"
+```
+
+If the rule action is `confirm`, the sandbox sees a `waiting for host approval` message and the broker enqueues the request. From a second terminal on the host:
+
+```sh
+$ bwai approve
+1 pending request:
+
+[a7f3c0e1] sandbox wants to run on host
+  cwd: /home/oscar/source/repos/foo
+  cmd: git commit -S -m fix
+  age: 4012ms
+[y]es / [n]o / [a]lways-this-session / [s]kip
+> y
+approved.
+```
+
+`always-this-session` adds the exact argv to an in-memory allowlist for the lifetime of this `bwai` process. Never persisted.
+
+The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, argv, cwd, matched rule, decision, exit code.
+
+See `docs/broker.md` for the full design.

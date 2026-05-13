@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -23,6 +24,19 @@ type Config struct {
 
 	// Environment variables from the host that are passed into the sandbox
 	EnvAllow []string `json:"env_allow"`
+
+	// Host-execution broker: lets specific argv lists escape the sandbox
+	// with user approval. See docs/broker.md.
+	Broker BrokerConfig `json:"broker"`
+}
+
+// BrokerConfig is the nested broker.* block. Disabled by default;
+// `rules: []` means everything is denied.
+type BrokerConfig struct {
+	Enabled          bool     `json:"enabled"`
+	Prompt           []string `json:"prompt"`
+	ApprovalTimeoutS int      `json:"approval_timeout_s"`
+	Rules            []Rule   `json:"rules"`
 }
 
 func defaultConfig() Config {
@@ -94,6 +108,12 @@ func defaultConfig() Config {
 			".config/Bitwarden",
 			".cache/nvidia",
 		},
+		Broker: BrokerConfig{
+			Enabled:          false,
+			Prompt:           []string{"oob"},
+			ApprovalTimeoutS: defaultApprovalTimeoutSec,
+			Rules:            []Rule{},
+		},
 	}
 }
 
@@ -116,6 +136,11 @@ func loadConfig(path string) (cfg Config, err error) {
 	}()
 	if err = json.NewDecoder(f).Decode(&cfg); err != nil {
 		return cfg, err
+	}
+	for i, r := range cfg.Broker.Rules {
+		if rerr := validateRule(r); rerr != nil {
+			return cfg, fmt.Errorf("broker.rules[%d]: %w", i, rerr)
+		}
 	}
 	return cfg, nil
 }
