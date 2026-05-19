@@ -98,28 +98,40 @@ func TestBroker_AutoAllow(t *testing.T) {
 		V: 1, Argv: []string{"echo", "hello"}, Cwd: projectDir,
 	})
 
-	// Expect: stdout("hello\n") + exit 0. No pending frame, no denied.
-	var sawStdout bool
-	var exitCode *int
+	// Expect: stdout("hello\n") + exit 0. Streaming may split output
+	// across multiple frames, so concatenate before comparing.
+	gotStdout, _, exitCode := collectStreams(t, frames)
+	if gotStdout != "hello\n" {
+		t.Errorf("stdout = %q, want %q", gotStdout, "hello\n")
+	}
 	for _, fr := range frames {
-		switch fr.Type {
-		case frameTypeStdout:
-			if fr.Data != "hello\n" {
-				t.Errorf("stdout %q want %q", fr.Data, "hello\n")
-			}
-			sawStdout = true
-		case frameTypeExit:
-			exitCode = fr.Code
-		case frameTypePending, frameTypeDenied:
+		if fr.Type == frameTypePending || fr.Type == frameTypeDenied {
 			t.Errorf("unexpected frame: %+v", fr)
 		}
-	}
-	if !sawStdout {
-		t.Error("missing stdout frame")
 	}
 	if exitCode == nil || *exitCode != 0 {
 		t.Errorf("exit code = %v, want 0", exitCode)
 	}
+}
+
+// collectStreams concatenates stdout/stderr frames in arrival order and
+// returns the final exit code. Streaming means a single conceptual
+// "stdout" can arrive as several frames; tests should never assume a
+// fixed frame count.
+func collectStreams(t *testing.T, frames []brokerFrame) (stdout, stderr string, exit *int) {
+	t.Helper()
+	var sb, eb strings.Builder
+	for _, fr := range frames {
+		switch fr.Type {
+		case frameTypeStdout:
+			sb.WriteString(fr.Data)
+		case frameTypeStderr:
+			eb.WriteString(fr.Data)
+		case frameTypeExit:
+			exit = fr.Code
+		}
+	}
+	return sb.String(), eb.String(), exit
 }
 
 func TestBroker_AutoDenyImplicit(t *testing.T) {
@@ -214,29 +226,21 @@ func TestBroker_ConfirmApproved(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("client err: %v", res.err)
 		}
-		var sawPending, sawStdout bool
-		var exitCode *int
+		var sawPending bool
 		for _, fr := range res.frames {
-			switch fr.Type {
-			case frameTypePending:
+			if fr.Type == frameTypePending {
 				sawPending = true
 				if fr.ID != approvedID {
 					t.Errorf("pending id %q want %q", fr.ID, approvedID)
 				}
-			case frameTypeStdout:
-				if strings.TrimSpace(fr.Data) != "approved" {
-					t.Errorf("stdout %q", fr.Data)
-				}
-				sawStdout = true
-			case frameTypeExit:
-				exitCode = fr.Code
 			}
 		}
+		gotStdout, _, exitCode := collectStreams(t, res.frames)
 		if !sawPending {
 			t.Error("missing pending frame")
 		}
-		if !sawStdout {
-			t.Error("missing stdout frame")
+		if strings.TrimSpace(gotStdout) != "approved" {
+			t.Errorf("stdout %q", gotStdout)
 		}
 		if exitCode == nil || *exitCode != 0 {
 			t.Errorf("exit = %v want 0", exitCode)
@@ -368,6 +372,80 @@ func TestBroker_ConfirmTimesOut(t *testing.T) {
 	last := frames[len(frames)-1]
 	if last.Type != frameTypeDenied || last.Reason != denyReasonTimeout {
 		t.Errorf("last frame = %+v, want denied:timeout", last)
+	}
+}
+
+// TestBroker_StreamsOutputIncrementally exercises the streaming path:
+// a bash one-liner emits two lines with a sleep between them. The
+// stdout frames must arrive before the exit frame, and at least one
+// stdout frame must arrive before the second line is even written by
+// the child (i.e., the first echo's frame shows up while the sleep
+// is still in progress). Without streaming this test cannot pass —
+// buffering would deliver everything after cmd.Wait returns.
+func TestBroker_StreamsOutputIncrementally(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules: []Rule{
+			{Match: []string{"bash", "-c", "echo first; sleep 0.2; echo second"}, Action: ActionAutoAllow},
+		},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+
+	conn, err := net.Dial("unix", b.BrokerSocketPath())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	req := brokerRequest{
+		V: 1, Argv: []string{"bash", "-c", "echo first; sleep 0.2; echo second"}, Cwd: projectDir,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	dec := json.NewDecoder(conn)
+	start := time.Now()
+
+	// First stdout frame must arrive well before the child's 200ms sleep
+	// elapses. If we still see nothing after 150ms, streaming is broken.
+	var first brokerFrame
+	if err := dec.Decode(&first); err != nil {
+		t.Fatalf("decode first frame: %v", err)
+	}
+	if first.Type != frameTypeStdout {
+		t.Fatalf("first frame = %+v, want stdout", first)
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("first stdout frame took %v; expected to arrive before the child's sleep ended (output was buffered)", elapsed)
+	}
+	if !strings.Contains(first.Data, "first") {
+		t.Errorf("first stdout frame = %q, want it to contain %q", first.Data, "first")
+	}
+
+	// Drain the rest. We don't care how many frames the second line
+	// arrives in, only that "second" is in there and exit comes last.
+	var rest []brokerFrame
+	for {
+		var fr brokerFrame
+		if err := dec.Decode(&fr); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatalf("decode: %v", err)
+		}
+		rest = append(rest, fr)
+	}
+	all := append([]brokerFrame{first}, rest...)
+	stdout, _, exit := collectStreams(t, all)
+	if !strings.Contains(stdout, "second") {
+		t.Errorf("stdout missing %q; got %q", "second", stdout)
+	}
+	if exit == nil || *exit != 0 {
+		t.Errorf("exit = %v, want 0", exit)
+	}
+	if all[len(all)-1].Type != frameTypeExit {
+		t.Errorf("last frame = %+v, want exit", all[len(all)-1])
 	}
 }
 

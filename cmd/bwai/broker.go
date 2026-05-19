@@ -322,36 +322,100 @@ func (b *Broker) awaitApproval(req brokerRequest, matchIdx int, enc *json.Encode
 }
 
 // execAndStream runs argv on the host (host env, request cwd) and
-// streams stdout/stderr/exit frames back. Output is buffered MVP — both
-// streams arrive as one frame each, then exit.
+// streams stdout/stderr/exit frames back as data arrives.
+//
+// Each pipe read becomes one frame, so a long-running command shows
+// incremental output to the sandbox client instead of being buffered
+// until exit. Frames can interleave at chunk boundaries between
+// stdout and stderr — that matches real terminal behaviour.
 func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx int, decision string) {
 	cmd := exec.Command(req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = req.Cwd
 	cmd.Env = os.Environ() // host env, not sandbox env
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	runErr := cmd.Run()
+	// Acquire pipes before Start; Wait closes them so readers must
+	// drain to EOF before Wait returns.
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		b.emitStartFailure(enc, req, matchIdx, decision, err)
+		return
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		b.emitStartFailure(enc, req, matchIdx, decision, err)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		b.emitStartFailure(enc, req, matchIdx, decision, err)
+		return
+	}
+
+	// json.Encoder is not safe for concurrent use; serialize writes
+	// from both reader goroutines through a mutex.
+	var encMu sync.Mutex
+	emit := func(fr brokerFrame) {
+		encMu.Lock()
+		defer encMu.Unlock()
+		_ = enc.Encode(fr)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		streamPipe(stdoutPipe, frameTypeStdout, emit)
+	}()
+	go func() {
+		defer wg.Done()
+		streamPipe(stderrPipe, frameTypeStderr, emit)
+	}()
+	wg.Wait()
+
 	exitCode := 0
-	if runErr != nil {
+	if runErr := cmd.Wait(); runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(runErr, &ee) {
 			exitCode = ee.ExitCode()
 		} else {
 			exitCode = -1
-			_, _ = stderr.WriteString("bwai broker: " + runErr.Error() + "\n")
+			emit(brokerFrame{Type: frameTypeStderr, Data: "bwai broker: " + runErr.Error() + "\n"})
 		}
 	}
-	if stdout.Len() > 0 {
-		_ = enc.Encode(brokerFrame{Type: frameTypeStdout, Data: stdout.String()})
-	}
-	if stderr.Len() > 0 {
-		_ = enc.Encode(brokerFrame{Type: frameTypeStderr, Data: stderr.String()})
-	}
 	code := exitCode
-	_ = enc.Encode(brokerFrame{Type: frameTypeExit, Code: &code})
+	emit(brokerFrame{Type: frameTypeExit, Code: &code})
 
+	b.auditLog.write(auditEntry{
+		Argv:        req.Argv,
+		Cwd:         req.Cwd,
+		MatchedRule: matchIdx,
+		Decision:    decision,
+		ExitCode:    &code,
+	})
+}
+
+// streamPipe reads chunks from r and turns each non-empty read into a
+// frame of the given type. Stops on EOF or read error.
+func streamPipe(r io.Reader, frameType string, emit func(brokerFrame)) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			emit(brokerFrame{Type: frameType, Data: string(buf[:n])})
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// emitStartFailure synthesizes the stderr+exit frame pair when the
+// child never started (bad path, fork failure, pipe alloc failure).
+// We can't ask the OS for an exit code in that case, so we use -1 to
+// match the previous behaviour.
+func (b *Broker) emitStartFailure(enc *json.Encoder, req brokerRequest, matchIdx int, decision string, runErr error) {
+	_ = enc.Encode(brokerFrame{Type: frameTypeStderr, Data: "bwai broker: " + runErr.Error() + "\n"})
+	code := -1
+	_ = enc.Encode(brokerFrame{Type: frameTypeExit, Code: &code})
 	b.auditLog.write(auditEntry{
 		Argv:        req.Argv,
 		Cwd:         req.Cwd,

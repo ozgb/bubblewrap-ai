@@ -107,8 +107,11 @@ closes the connection.
 so the agent sees a "waiting on user" signal instead of silence. `auto_allow`
 rules skip straight to `stdout`/`stderr`/`exit`.
 
-MVP: stdout/stderr buffered and sent at the end. Streaming can land later
-without protocol changes — frames are already chunked.
+Output streams incrementally: each read from the child's stdout/stderr
+pipes becomes one frame, so a long-running command shows output to the
+sandbox client as it goes rather than waiting for exit. stdout and
+stderr frames can interleave at chunk boundaries — matches real
+terminal behaviour.
 
 ## Approval flow
 
@@ -306,19 +309,17 @@ Aim for the smallest end-to-end thing that proves the design:
 - [x] `broker.sock` + `approve.sock`
 - [x] `bwai-outside` argv[0] dispatch (sandbox-side client)
 - [x] `bwai approve` subcommand (host-side approver client)
-- [x] Literal-argv rules only (no `*` / `**` yet)
 - [x] Out-of-band approver only (no tmux, no zenity)
-- [x] Buffered output, no streaming
 - [x] Audit log
 - [x] `always-this-session` (in-memory, never persisted — landed alongside the slice because the wire protocol already needed the decision tag)
+- [x] Glob patterns (`*` and `**`). `argv[0]` is always literal; `**` is only valid as the final token.
+- [x] `bwai broker check` dry-run
+- [x] Output streaming
 
 Follow-ups, in roughly that order:
 
-- [ ] Glob patterns (`*` and `**`) — currently rejected at config load with a friendly error so a typo doesn't silently fall through to implicit deny
-- [ ] `bwai broker check` dry-run
 - [ ] tmux `display-popup` approver — `broker.prompt` is parsed but only `"oob"` is honored
 - [ ] zenity / kdialog approver
-- [ ] Output streaming
 - [ ] Pty passthrough
 
 ### Implementation decisions worth recording

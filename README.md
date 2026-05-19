@@ -181,7 +181,7 @@ Enable it by adding a `broker` block to `~/.bwai.json`:
 }
 ```
 
-Rules in this release match argv **literally** — no `*` / `**` wildcards yet. Each token must equal the corresponding sandbox argv exactly. Anything not matched by a rule is denied.
+Each rule's `match` is an argv pattern. Tokens match literally except for two wildcards: `*` matches exactly one argv slot, and `**` matches zero or more *trailing* slots (last position only). `argv[0]` is always literal. Anything not matched by a rule is denied. See `docs/broker.md` for the full matcher rules and `bwai broker check <argv>...` to dry-run a request against your config.
 
 Three actions:
 

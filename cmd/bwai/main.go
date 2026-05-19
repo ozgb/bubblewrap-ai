@@ -25,6 +25,8 @@ func main() {
 		switch os.Args[1] {
 		case "approve":
 			os.Exit(runApproveCLI(os.Args[2:]))
+		case "broker":
+			os.Exit(runBrokerCLI(os.Args[2:]))
 		}
 	}
 	os.Exit(runSandbox())
