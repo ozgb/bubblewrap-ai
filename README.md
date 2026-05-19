@@ -19,9 +19,17 @@ chmod +x ~/.local/bin/bwai
 ### From source
 
 ```sh
-make build
-cp bin/bwai ~/.local/bin/
+make install
 ```
+
+Installs to `~/.local/bin/bwai` by default. Override with `PREFIX` or `BINDIR`:
+
+```sh
+make install PREFIX=/usr/local        # /usr/local/bin/bwai (needs sudo)
+make install BINDIR=/opt/bin          # /opt/bin/bwai
+```
+
+Or just build without installing: `make build` puts the binary at `bin/bwai`.
 
 ## Usage
 
