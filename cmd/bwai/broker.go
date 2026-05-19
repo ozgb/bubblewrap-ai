@@ -18,12 +18,21 @@ import (
 )
 
 // Wire protocol — sandbox → host (broker.sock).
+//
+// Op selects the request kind. Backward-compat: an absent or empty
+// Op means "exec" (the original behaviour).
 type brokerRequest struct {
 	V            int      `json:"v"`
+	Op           string   `json:"op,omitempty"` // "exec" (default) | "list_rules"
 	Argv         []string `json:"argv"`
 	Cwd          string   `json:"cwd"`
 	StdinInherit bool     `json:"stdin_inherit"`
 }
+
+const (
+	opExec      = "exec"
+	opListRules = "list_rules"
+)
 
 // Wire protocol — host → sandbox reply frames. Pointer for Code so the
 // difference between "exit 0" and "no exit yet" survives JSON encoding.
@@ -33,6 +42,7 @@ type brokerFrame struct {
 	Data   string `json:"data,omitempty"`
 	Code   *int   `json:"code,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	Rules  []Rule `json:"rules,omitempty"` // populated only for frameTypeRules
 }
 
 const (
@@ -41,6 +51,7 @@ const (
 	frameTypeStderr  = "stderr"
 	frameTypeExit    = "exit"
 	frameTypeDenied  = "denied"
+	frameTypeRules   = "rules"
 )
 
 const (
@@ -237,7 +248,22 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
 	}
-	if req.V != 1 || len(req.Argv) == 0 {
+	if req.V != 1 {
+		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
+		return
+	}
+	// Op dispatch. Empty/missing Op == "exec" for backward compat.
+	switch req.Op {
+	case "", opExec:
+		// fall through to the exec path below
+	case opListRules:
+		_ = enc.Encode(brokerFrame{Type: frameTypeRules, Rules: b.cfg.Rules})
+		return
+	default:
+		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
+		return
+	}
+	if len(req.Argv) == 0 {
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
 	}
