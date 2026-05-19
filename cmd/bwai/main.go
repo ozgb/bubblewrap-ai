@@ -100,11 +100,19 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
+		if err := installAgentMemoryFile(broker.TmpDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai: install CLAUDE.md: %v\n", err)
+			_ = broker.Close()
+			return 1
+		}
 		go broker.Serve()
 		defer broker.Close()
 	}
 
 	fmt.Printf("bwai: sandboxed in %s\n", currentDir)
+	if broker != nil {
+		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
+	}
 	args := []string{
 		// Clear the inherited environment; only whitelisted vars are passed through below
 		"--clearenv",
@@ -147,10 +155,14 @@ func runSandbox() int {
 	if broker != nil {
 		// Bind broker.sock to /run/bwai/broker.sock and the helper
 		// binary to /run/bwai/bin/bwai-outside. approve.sock is
-		// *not* bind-mounted — it's host-only.
+		// *not* bind-mounted — it's host-only. CLAUDE.md is exposed
+		// so an agent started with `--add-dir /run/bwai` (and
+		// CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1) learns
+		// about bwai-outside from its memory bootstrap.
 		args = append(args,
 			"--bind", broker.BrokerSocketPath(), "/run/bwai/broker.sock",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bin", "bwai-outside"), "/run/bwai/bin/bwai-outside",
+			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
 			"--setenv", "PATH", os.Getenv("PATH")+":/run/bwai/bin",
 		)
@@ -197,6 +209,50 @@ func runSandbox() int {
 		return 1
 	}
 	return 0
+}
+
+// agentMemoryFileContent is the CLAUDE.md fragment that bwai writes
+// into the broker tmpdir. When Claude Code is started inside the
+// sandbox with `--add-dir /run/bwai` and
+// CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1, this file is loaded
+// as part of its memory bootstrap, teaching the agent about the
+// bwai-outside tool. Other agents that respect AGENTS.md / similar
+// conventions can be wired up the same way.
+const agentMemoryFileContent = `# bwai broker
+
+This shell is running inside a bwai sandbox. The host filesystem is
+read-only and your network calls are unrestricted, but operations that
+need host-only credentials (signed commits, ssh push, gh, etc.) cannot
+run directly.
+
+To run a command on the host, invoke ` + "`bwai-outside`" + ` instead of the
+command directly:
+
+` + "```sh" + `
+bwai-outside git status
+bwai-outside gh pr list
+bwai-outside git commit -m "fix bug"
+` + "```" + `
+
+- ` + "`bwai-outside --help`" + ` (or no args) — prints this help and the
+  current rule list, including which commands are auto-allowed and
+  which require human confirmation.
+- ` + "`bwai-outside --list-rules`" + ` — just the rules.
+
+If a command is denied, it isn't on the allowlist. Check
+` + "`bwai-outside --list-rules`" + ` first rather than retrying.
+
+Commands flagged ` + "`CONFIRM`" + ` will pause until the human approves them
+via ` + "`bwai approve`" + ` on the host. Output from approved commands streams
+back as it would from a normal shell.
+`
+
+// installAgentMemoryFile writes the CLAUDE.md fragment into the
+// broker tmpdir. It's bind-mounted into the sandbox at
+// /run/bwai/CLAUDE.md.
+func installAgentMemoryFile(tmpDir string) error {
+	dstPath := filepath.Join(tmpDir, "CLAUDE.md")
+	return os.WriteFile(dstPath, []byte(agentMemoryFileContent), 0o644)
 }
 
 // installBwaiOutsideHelper places a copy of the running bwai binary

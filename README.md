@@ -213,4 +213,34 @@ approved.
 
 The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, argv, cwd, matched rule, decision, exit code.
 
+### Telling the agent it can call `bwai-outside`
+
+The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a CLAUDE.md fragment at `/run/bwai/CLAUDE.md` describing the tool and how to list its rules. Two pieces to wire it up on the agent side:
+
+1. **Tell Claude Code to load memory from additional directories.** Set the env var globally (e.g. in your shell rc) or per-sandbox via the bash rcfile you point `bwai` at:
+
+   ```sh
+   # ~/.bashrc.bwai  (or wherever the sandbox shell sources its rc from)
+   export CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1
+   ```
+
+   Without this var, `--add-dir` won't load CLAUDE.md files.
+
+2. **Start Claude with `/run/bwai` as an additional directory:**
+
+   ```sh
+   claude --add-dir /run/bwai
+   ```
+
+   Claude reads `/run/bwai/CLAUDE.md` as part of its memory bootstrap and learns it can call `bwai-outside`.
+
+Inside the sandbox, the agent (or you) can always check what's allowed:
+
+```sh
+bwai-outside --help          # usage + rule list
+bwai-outside --list-rules    # just the rules, e.g. for piping to less
+```
+
+Output is grouped by `AUTO_ALLOW` / `CONFIRM` / `AUTO_DENY` so it's easy to scan — the agent uses the same view a human does.
+
 See `docs/broker.md` for the full design.
