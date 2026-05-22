@@ -528,10 +528,11 @@ type approverRequest struct {
 }
 
 type approverPending struct {
-	ID    string   `json:"id"`
-	Argv  []string `json:"argv"`
-	Cwd   string   `json:"cwd"`
-	AgeMs int64    `json:"age_ms"`
+	ID         string   `json:"id"`
+	Argv       []string `json:"argv"`
+	Cwd        string   `json:"cwd"`
+	AgeMs      int64    `json:"age_ms"`
+	ProjectDir string   `json:"project_dir,omitempty"`
 }
 
 type approverReply struct {
@@ -597,10 +598,11 @@ func (b *Broker) snapshotPending() []approverPending {
 	now := time.Now()
 	for _, p := range b.pending {
 		out = append(out, approverPending{
-			ID:    p.id,
-			Argv:  p.req.Argv,
-			Cwd:   p.req.Cwd,
-			AgeMs: now.Sub(p.enqueued).Milliseconds(),
+			ID:         p.id,
+			Argv:       p.req.Argv,
+			Cwd:        p.req.Cwd,
+			AgeMs:      now.Sub(p.enqueued).Milliseconds(),
+			ProjectDir: b.projectDir,
 		})
 	}
 	return out
