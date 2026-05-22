@@ -220,19 +220,40 @@ func runSandbox() int {
 // conventions can be wired up the same way.
 const agentMemoryFileContent = `# bwai broker
 
-This shell is running inside a bwai sandbox. The host filesystem is
-read-only and your network calls are unrestricted, but operations that
-need host-only credentials (signed commits, ssh push, gh, etc.) cannot
-run directly.
+This shell runs inside a bwai sandbox. The project working tree is
+read-write and the network is reachable, but host-only credentials —
+` + "`~/.gnupg`" + `, ` + "`~/.ssh`" + `, ` + "`~/.aws`" + `, ` + "`gh`" + `'s auth, etc. — are deliberately
+not mounted into the sandbox.
 
-To run a command on the host, invoke ` + "`bwai-outside`" + ` instead of the
-command directly:
+` + "`bwai-outside`" + ` is a narrow escape hatch for commands that need those
+host credentials. **Default to running commands directly.** Only reach
+for ` + "`bwai-outside`" + ` when a command would otherwise fail because the
+sandbox hides a credential it needs. Ordinary work on local files —
+including reading, editing, and committing — does *not* need it.
+
+Use ` + "`bwai-outside`" + ` when the command requires host-only state:
 
 ` + "```sh" + `
-bwai-outside git status
-bwai-outside gh pr list
-bwai-outside git commit -m "fix bug"
+bwai-outside git commit -S -m "fix bug"   # signed commit — needs ~/.gnupg
+bwai-outside git push                     # ssh push — needs ~/.ssh
+bwai-outside gh pr create                 # needs host gh auth
 ` + "```" + `
+
+Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
+these all succeed inside the sandbox:
+
+` + "```sh" + `
+git status
+git add -A
+git commit -m "fix bug"          # unsigned commit; no host creds needed
+git diff
+make test
+npm install
+` + "```" + `
+
+Heuristic: if a command only touches the project tree or the network,
+run it directly. ` + "`bwai-outside`" + ` is for the small set of operations
+that need a credential the sandbox deliberately hides.
 
 - ` + "`bwai-outside --help`" + ` (or no args) — prints this help and the
   current rule list, including which commands are auto-allowed and
