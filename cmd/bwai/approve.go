@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -11,67 +12,114 @@ import (
 	"strings"
 )
 
-// runApproveCLI implements `bwai approve [--id ID]`. Host-side only.
-// Walks the user through pending requests on approve.sock and posts a
-// decision frame for each.
+// runApproveCLI implements `bwai approve [--id ID] [--socket PATH]`.
+// Host-side only. Walks the user through pending requests on every
+// running broker's approve.sock and posts decisions back to the broker
+// that owns each request.
 //
-// The approve socket lives at /tmp/bwai-$PID/approve.sock for the
-// currently running bwai parent. We look up the most recent one by
-// scanning /tmp; an explicit --socket overrides.
+// Each broker lives at /tmp/bwai-$PID/approve.sock. With no --socket,
+// we discover every match under /tmp/bwai-* and fan out the `list` op
+// across all of them, merging the pending queues into a single walk.
+// Decisions are routed back over the per-broker connection so we never
+// send a `decide` to the wrong broker.
 func runApproveCLI(args []string) int {
 	fs := flag.NewFlagSet("approve", flag.ContinueOnError)
 	idFlag := fs.String("id", "", "Operate on one specific request id (skips the queue walk)")
-	sockFlag := fs.String("socket", "", "Path to approve.sock (default: auto-discover from /tmp/bwai-*)")
+	sockFlag := fs.String("socket", "", "Path to a single approve.sock (default: fan out across all /tmp/bwai-*)")
 	if err := fs.Parse(args); err != nil {
 		return 64
 	}
 
-	sockPath := *sockFlag
-	if sockPath == "" {
-		discovered, err := discoverApproveSocket()
+	var sockPaths []string
+	if *sockFlag != "" {
+		sockPaths = []string{*sockFlag}
+	} else {
+		discovered, err := discoverApproveSockets()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bwai approve: %v\n", err)
 			return 1
 		}
-		sockPath = discovered
+		sockPaths = discovered
 	}
 
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai approve: connect %s: %v\n", sockPath, err)
-		return 1
+	// brokerConn keeps the per-broker connection open across list/decide
+	// so a decision posts to the broker that originally enqueued the
+	// pending request.
+	type brokerConn struct {
+		sockPath string
+		conn     net.Conn
+		enc      *json.Encoder
+		dec      *json.Decoder
 	}
-	defer conn.Close()
+	var conns []*brokerConn
+	defer func() {
+		for _, bc := range conns {
+			_ = bc.conn.Close()
+		}
+	}()
 
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
+	type pendingWithSource struct {
+		approverPending
+		source *brokerConn
+	}
+	var merged []pendingWithSource
 
-	if err := enc.Encode(approverRequest{Op: "list"}); err != nil {
-		fmt.Fprintf(os.Stderr, "bwai approve: send list: %v\n", err)
-		return 1
+	for _, sp := range sockPaths {
+		conn, err := net.Dial("unix", sp)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bwai approve: connect %s: %v (skipping)\n", sp, err)
+			continue
+		}
+		bc := &brokerConn{
+			sockPath: sp,
+			conn:     conn,
+			enc:      json.NewEncoder(conn),
+			dec:      json.NewDecoder(conn),
+		}
+		if err := bc.enc.Encode(approverRequest{Op: "list"}); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai approve: send list to %s: %v\n", sp, err)
+			_ = conn.Close()
+			continue
+		}
+		var reply approverReply
+		if err := bc.dec.Decode(&reply); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai approve: read list from %s: %v\n", sp, err)
+			_ = conn.Close()
+			continue
+		}
+		if reply.Error != "" {
+			fmt.Fprintf(os.Stderr, "bwai approve: %s: %s\n", sp, reply.Error)
+			_ = conn.Close()
+			continue
+		}
+		conns = append(conns, bc)
+		for _, p := range reply.Pending {
+			merged = append(merged, pendingWithSource{approverPending: p, source: bc})
+		}
 	}
-	var reply approverReply
-	if err := dec.Decode(&reply); err != nil {
-		fmt.Fprintf(os.Stderr, "bwai approve: read list: %v\n", err)
-		return 1
-	}
-	if reply.Error != "" {
-		fmt.Fprintf(os.Stderr, "bwai approve: %s\n", reply.Error)
-		return 1
-	}
-	pending := reply.Pending
+
 	if *idFlag != "" {
-		pending = filterByID(pending, *idFlag)
+		filtered := merged[:0]
+		for _, p := range merged {
+			if p.ID == *idFlag {
+				filtered = append(filtered, p)
+			}
+		}
+		merged = filtered
 	}
-	if len(pending) == 0 {
+	if len(merged) == 0 {
 		fmt.Println("no pending requests.")
 		return 0
 	}
 
-	fmt.Printf("%d pending request:\n\n", len(pending))
+	fmt.Printf("%d pending request%s across %d broker%s:\n\n",
+		len(merged), pluralS(len(merged)), len(conns), pluralS(len(conns)))
 	stdin := bufio.NewReader(os.Stdin)
-	for _, p := range pending {
+	for _, p := range merged {
 		fmt.Printf("[%s] sandbox wants to run on host\n", p.ID)
+		if p.ProjectDir != "" {
+			fmt.Printf("  project: %s\n", p.ProjectDir)
+		}
 		fmt.Printf("  cwd: %s\n", p.Cwd)
 		fmt.Printf("  cmd: %s\n", strings.Join(p.Argv, " "))
 		fmt.Printf("  age: %dms\n", p.AgeMs)
@@ -97,14 +145,14 @@ func runApproveCLI(args []string) int {
 			fmt.Println("unrecognized choice; skipped.")
 			continue
 		}
-		if err := enc.Encode(approverRequest{Op: "decide", ID: p.ID, Decision: decision}); err != nil {
-			fmt.Fprintf(os.Stderr, "bwai approve: send decide: %v\n", err)
-			return 1
+		if err := p.source.enc.Encode(approverRequest{Op: "decide", ID: p.ID, Decision: decision}); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai approve: send decide to %s: %v\n", p.source.sockPath, err)
+			continue
 		}
 		var dreply approverReply
-		if err := dec.Decode(&dreply); err != nil {
-			fmt.Fprintf(os.Stderr, "bwai approve: read decide: %v\n", err)
-			return 1
+		if err := p.source.dec.Decode(&dreply); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai approve: read decide from %s: %v\n", p.source.sockPath, err)
+			continue
 		}
 		if !dreply.OK {
 			fmt.Fprintf(os.Stderr, "bwai approve: %s\n", dreply.Error)
@@ -115,39 +163,24 @@ func runApproveCLI(args []string) int {
 	return 0
 }
 
-func filterByID(pending []approverPending, id string) []approverPending {
-	out := pending[:0]
-	for _, p := range pending {
-		if p.ID == id {
-			out = append(out, p)
-		}
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
 	}
-	return out
+	return "s"
 }
 
-// discoverApproveSocket finds /tmp/bwai-*/approve.sock owned by the
-// current user. If there is more than one, the newest wins; bwai
-// instances are short-lived enough that the heuristic is good enough
-// for MVP. Users who need precision pass --socket.
-func discoverApproveSocket() (string, error) {
+// discoverApproveSockets returns every /tmp/bwai-*/approve.sock present
+// on the host, in lexical (glob) order. Empty result is an error so
+// callers can surface a useful message; callers further filter by
+// whether the socket actually accepts connections.
+func discoverApproveSockets() ([]string, error) {
 	matches, err := filepath.Glob("/tmp/bwai-*/approve.sock")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var newest string
-	var newestModTime int64
-	for _, m := range matches {
-		info, err := os.Stat(m)
-		if err != nil {
-			continue
-		}
-		if info.ModTime().UnixNano() > newestModTime {
-			newestModTime = info.ModTime().UnixNano()
-			newest = m
-		}
+	if len(matches) == 0 {
+		return nil, errors.New("no bwai approve.sock found under /tmp/bwai-*; is bwai running with broker enabled?")
 	}
-	if newest == "" {
-		return "", fmt.Errorf("no bwai approve.sock found under /tmp/bwai-*; is bwai running with broker enabled?")
-	}
-	return newest, nil
+	return matches, nil
 }

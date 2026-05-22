@@ -449,6 +449,125 @@ func TestBroker_StreamsOutputIncrementally(t *testing.T) {
 	}
 }
 
+// TestBroker_MultiBroker_ApproverRoutesPerSocket pins the invariant
+// that each broker's approve.sock owns only its own pending queue:
+// two brokers running in parallel must not see each other's pending
+// requests, and a decide on broker A must not resolve a request
+// belonging to broker B. This is the contract `bwai approve` relies
+// on when it fans out across /tmp/bwai-*/approve.sock — if it broke,
+// the approver would route decisions to the wrong broker and confirms
+// would silently time out.
+func TestBroker_MultiBroker_ApproverRoutesPerSocket(t *testing.T) {
+	projectDirA := t.TempDir()
+	projectDirB := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled:          true,
+		ApprovalTimeoutS: 5,
+		Rules:            []Rule{{Match: []string{"echo", "multi"}, Action: ActionConfirm}},
+	}
+	bA := startTestBroker(t, cfg, projectDirA)
+	bB := startTestBroker(t, cfg, projectDirB)
+
+	resA := make(chan []brokerFrame, 1)
+	resB := make(chan []brokerFrame, 1)
+	go func() {
+		resA <- sendRequest(t, bA.BrokerSocketPath(), brokerRequest{
+			V: 1, Argv: []string{"echo", "multi"}, Cwd: projectDirA,
+		})
+	}()
+	go func() {
+		resB <- sendRequest(t, bB.BrokerSocketPath(), brokerRequest{
+			V: 1, Argv: []string{"echo", "multi"}, Cwd: projectDirB,
+		})
+	}()
+
+	// Wait for both to enqueue, then snapshot each approve.sock and
+	// verify the queues are disjoint and project-tagged correctly.
+	listOne := func(sockPath string) []approverPending {
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("dial %s: %v", sockPath, err)
+		}
+		defer conn.Close()
+		if err := json.NewEncoder(conn).Encode(approverRequest{Op: "list"}); err != nil {
+			t.Fatalf("encode list: %v", err)
+		}
+		var reply approverReply
+		if err := json.NewDecoder(conn).Decode(&reply); err != nil {
+			t.Fatalf("decode list: %v", err)
+		}
+		return reply.Pending
+	}
+
+	var pendA, pendB []approverPending
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pendA = listOne(bA.ApproveSocketPath())
+		pendB = listOne(bB.ApproveSocketPath())
+		if len(pendA) == 1 && len(pendB) == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(pendA) != 1 || len(pendB) != 1 {
+		t.Fatalf("expected 1 pending per broker, got A=%d B=%d", len(pendA), len(pendB))
+	}
+	if pendA[0].ID == pendB[0].ID {
+		t.Fatalf("ids collided across brokers: %s", pendA[0].ID)
+	}
+	if pendA[0].ProjectDir != projectDirA {
+		t.Errorf("brokerA project_dir = %q, want %q", pendA[0].ProjectDir, projectDirA)
+	}
+	if pendB[0].ProjectDir != projectDirB {
+		t.Errorf("brokerB project_dir = %q, want %q", pendB[0].ProjectDir, projectDirB)
+	}
+
+	// Cross-broker decide must fail: brokerA does not own brokerB's id.
+	{
+		conn, err := net.Dial("unix", bA.ApproveSocketPath())
+		if err != nil {
+			t.Fatalf("dial A: %v", err)
+		}
+		_ = json.NewEncoder(conn).Encode(approverRequest{Op: "decide", ID: pendB[0].ID, Decision: "approve"})
+		var reply approverReply
+		_ = json.NewDecoder(conn).Decode(&reply)
+		conn.Close()
+		if reply.OK {
+			t.Fatalf("brokerA accepted decide for brokerB's id %s", pendB[0].ID)
+		}
+	}
+
+	// Approve each on its own socket; both client requests should
+	// complete successfully.
+	approveOn := func(sockPath, id, decision string) {
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("dial %s: %v", sockPath, err)
+		}
+		defer conn.Close()
+		_ = json.NewEncoder(conn).Encode(approverRequest{Op: "decide", ID: id, Decision: decision})
+		var reply approverReply
+		_ = json.NewDecoder(conn).Decode(&reply)
+		if !reply.OK {
+			t.Fatalf("decide on %s failed: %s", sockPath, reply.Error)
+		}
+	}
+	approveOn(bA.ApproveSocketPath(), pendA[0].ID, "approve")
+	approveOn(bB.ApproveSocketPath(), pendB[0].ID, "approve")
+
+	for _, ch := range []chan []brokerFrame{resA, resB} {
+		select {
+		case frames := <-ch:
+			_, _, exit := collectStreams(t, frames)
+			if exit == nil || *exit != 0 {
+				t.Errorf("exit = %v, want 0; frames = %+v", exit, frames)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("client never returned")
+		}
+	}
+}
+
 func TestBroker_RejectsInvalidVersion(t *testing.T) {
 	projectDir := t.TempDir()
 	cfg := BrokerConfig{
