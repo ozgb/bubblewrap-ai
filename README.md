@@ -112,7 +112,8 @@ Example `~/.bwai.json`:
     ".bashrc.d",
     ".password-store",
     ".bash_history*",
-    ".config/Bitwarden"
+    ".config/Bitwarden",
+    ".cache/nvidia"
   ],
   "env_allow": [
     "TERM",
