@@ -92,6 +92,7 @@ func defaultConfig() Config {
 			".password-store",
 			".bash_history*",
 			".config/Bitwarden",
+			".cache/nvidia",
 		},
 	}
 }

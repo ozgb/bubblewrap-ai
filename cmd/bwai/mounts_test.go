@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,6 +61,29 @@ func TestSubPathMounts(t *testing.T) {
 	}
 	if !containsSequence(args, "--test", existingDir) {
 		t.Errorf("args missing expected sequence; got %v", args)
+	}
+}
+
+func TestGPUMounts(t *testing.T) {
+	// gpuMounts() reads from the real /dev, so we can only assert stable
+	// structural properties: arguments come in --dev-bind triplets and each
+	// source path belongs to the expected /dev/dri or /dev/nvidia* families.
+	args := gpuMounts()
+
+	for i := 0; i < len(args); i += 3 {
+		if args[i] != "--dev-bind" {
+			t.Errorf("expected --dev-bind at index %d, got %q", i, args[i])
+		}
+		if i+2 >= len(args) {
+			t.Fatalf("incomplete --dev-bind triplet at index %d: %v", i, args[i:])
+		}
+		src := args[i+1]
+		if _, err := os.Stat(src); err != nil {
+			t.Errorf("gpuMounts returned non-existent path %q: %v", src, err)
+		}
+		if !strings.HasPrefix(src, "/dev/dri") && !strings.HasPrefix(src, "/dev/nvidia") {
+			t.Errorf("gpuMounts returned unexpected path %q", src)
+		}
 	}
 }
 

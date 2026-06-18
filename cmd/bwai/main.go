@@ -85,6 +85,7 @@ func main() {
 		// Device nodes
 		"--dev", "/dev",
 	)
+	args = append(args, gpuMounts()...)
 	args = append(args, shmMount()...)
 	args = append(args,
 		// Virtual filesystems

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -81,4 +82,21 @@ func dnsMounts() []string {
 		return roBind(p)
 	}
 	return nil
+}
+
+// Bind GPU device nodes into the sandbox if they exist on this host.
+// This includes the DRI subsystem and any NVIDIA character devices.
+func gpuMounts() []string {
+	var args []string
+	if info, err := os.Stat("/dev/dri"); err == nil && info.IsDir() {
+		args = append(args, devBind("/dev/dri")...)
+	}
+	matches, err := filepath.Glob("/dev/nvidia*")
+	if err == nil {
+		sort.Strings(matches)
+		for _, p := range matches {
+			args = append(args, devBind(p)...)
+		}
+	}
+	return args
 }
