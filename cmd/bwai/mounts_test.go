@@ -177,6 +177,211 @@ func TestHomeMounts(t *testing.T) {
 	})
 }
 
+func TestReadGitdirPointer(t *testing.T) {
+	t.Run("absolute pointer", func(t *testing.T) {
+		dir := t.TempDir()
+		dotGit := filepath.Join(dir, ".git")
+		target := filepath.Join(t.TempDir(), "worktrees", "wt")
+		if err := os.WriteFile(dotGit, []byte("gitdir: "+target+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := readGitdirPointer(dotGit); got != target {
+			t.Errorf("readGitdirPointer = %q, want %q", got, target)
+		}
+	})
+
+	t.Run("relative pointer resolves against worktree root", func(t *testing.T) {
+		dir := t.TempDir()
+		dotGit := filepath.Join(dir, ".git")
+		if err := os.WriteFile(dotGit, []byte("gitdir: ../main/.git/worktrees/wt\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Clean(filepath.Join(dir, "../main/.git/worktrees/wt"))
+		if got := readGitdirPointer(dotGit); got != want {
+			t.Errorf("readGitdirPointer = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("not a gitdir pointer", func(t *testing.T) {
+		dir := t.TempDir()
+		dotGit := filepath.Join(dir, ".git")
+		if err := os.WriteFile(dotGit, []byte("something else\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if got := readGitdirPointer(dotGit); got != "" {
+			t.Errorf("readGitdirPointer = %q, want empty", got)
+		}
+	})
+
+	t.Run("missing file", func(t *testing.T) {
+		if got := readGitdirPointer(filepath.Join(t.TempDir(), ".git")); got != "" {
+			t.Errorf("readGitdirPointer = %q, want empty", got)
+		}
+	})
+}
+
+func TestResolveCommonDir(t *testing.T) {
+	t.Run("relative commondir", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), "main", ".git", "worktrees", "wt")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Clean(filepath.Join(gitDir, "../.."))
+		if got := resolveCommonDir(gitDir); got != want {
+			t.Errorf("resolveCommonDir = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no commondir file falls back to gitDir", func(t *testing.T) {
+		gitDir := t.TempDir()
+		if got := resolveCommonDir(gitDir); got != gitDir {
+			t.Errorf("resolveCommonDir = %q, want %q", got, gitDir)
+		}
+	})
+}
+
+func TestIsWithin(t *testing.T) {
+	tests := []struct {
+		name          string
+		parent, child string
+		want          bool
+	}{
+		{"identical", "/a/b", "/a/b", true},
+		{"nested", "/a/b", "/a/b/c", true},
+		{"sibling", "/a/b", "/a/c", false},
+		{"parent of", "/a/b", "/a", false},
+		{"prefix but not nested", "/a/b", "/a/bc", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isWithin(tt.parent, tt.child); got != tt.want {
+				t.Errorf("isWithin(%q, %q) = %v, want %v", tt.parent, tt.child, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitWorktreeMounts(t *testing.T) {
+	t.Run("ordinary checkout returns nil", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitWorktreeMounts(dir); got != nil {
+			t.Errorf("expected nil for ordinary checkout, got %v", got)
+		}
+	})
+
+	t.Run("non-git dir returns nil", func(t *testing.T) {
+		if got := gitWorktreeMounts(t.TempDir()); got != nil {
+			t.Errorf("expected nil for non-git dir, got %v", got)
+		}
+	})
+
+	t.Run("gitdir nested under common dir yields single bind", func(t *testing.T) {
+		root := t.TempDir()
+		// main repo .git with the worktree gitdir nested under it
+		commonDir := filepath.Join(root, "main", ".git")
+		gitDir := filepath.Join(commonDir, "worktrees", "wt")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// the linked worktree itself
+		wt := filepath.Join(root, "wt")
+		if err := os.MkdirAll(wt, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		args := gitWorktreeMounts(wt)
+		want := filepath.Clean(commonDir)
+		if !containsSequence(args, "--bind", want, want) {
+			t.Errorf("expected single --bind of common dir %q; args: %v", want, args)
+		}
+		// only one --bind total
+		count := 0
+		for _, a := range args {
+			if a == "--bind" {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("expected exactly one --bind, got %d; args: %v", count, args)
+		}
+	})
+
+	t.Run("gitdir outside common dir yields two binds", func(t *testing.T) {
+		root := t.TempDir()
+		commonDir := filepath.Join(root, "main", ".git")
+		gitDir := filepath.Join(root, "elsewhere", "gitdir")
+		if err := os.MkdirAll(commonDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// commondir points outside gitDir, to the separate common dir
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte(commonDir+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		wt := filepath.Join(root, "wt")
+		if err := os.MkdirAll(wt, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		args := gitWorktreeMounts(wt)
+		wantCommon := filepath.Clean(commonDir)
+		wantGitDir := filepath.Clean(gitDir)
+		if !containsSequence(args, "--bind", wantCommon, wantCommon) {
+			t.Errorf("expected --bind of common dir %q; args: %v", wantCommon, args)
+		}
+		if !containsSequence(args, "--bind", wantGitDir, wantGitDir) {
+			t.Errorf("expected --bind of separate gitdir %q; args: %v", wantGitDir, args)
+		}
+	})
+
+	t.Run("relative pointer and relative commondir resolve correctly", func(t *testing.T) {
+		root := t.TempDir()
+		commonDir := filepath.Join(root, "main", ".git")
+		gitDir := filepath.Join(commonDir, "worktrees", "wt")
+		if err := os.MkdirAll(gitDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		wt := filepath.Join(root, "wt")
+		if err := os.MkdirAll(wt, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// relative gitdir pointer, relative to the worktree root
+		rel, err := filepath.Rel(wt, gitDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+rel+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		args := gitWorktreeMounts(wt)
+		want := filepath.Clean(commonDir)
+		if !containsSequence(args, "--bind", want, want) {
+			t.Errorf("expected --bind of common dir %q; args: %v", want, args)
+		}
+	})
+}
+
 // containsSequence reports whether needle appears as a contiguous subsequence in haystack.
 func containsSequence(haystack []string, needle ...string) bool {
 	return indexOfSequence(haystack, needle...) != -1

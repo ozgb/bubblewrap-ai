@@ -170,6 +170,10 @@ Example `~/.bwai.json`:
 
 `home_allow` takes precedence over `home_block`.
 
+### Git worktrees
+
+Linked git worktrees (created by `worktrunk` or `git worktree add`) keep their real git dir inside the main repo, which the home sandbox hides. `bwai` detects this automatically — no config needed — and bind-mounts the shared git dir read-write at its real host path, so history, `git status`, commits, and branch ops all work inside the sandbox just like in an ordinary checkout. Only the git dir is exposed, not the rest of the main repo's working tree.
+
 ## Host-execution broker (experimental)
 
 Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — `git commit -S` needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`. The broker lets specific argv lists escape to the host with per-command rules.

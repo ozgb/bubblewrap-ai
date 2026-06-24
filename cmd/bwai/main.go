@@ -109,7 +109,14 @@ func runSandbox() int {
 		defer broker.Close()
 	}
 
+	// Linked git worktrees keep their real git dir inside the main repo,
+	// which the home --tmpfs hides. Detect that and bind it back in.
+	gitMounts := gitWorktreeMounts(currentDir)
+
 	fmt.Printf("bwai: sandboxed in %s\n", currentDir)
+	if len(gitMounts) > 0 {
+		fmt.Println("bwai: detected a git worktree — exposing its git dir so history and commits work.")
+	}
 	if broker != nil {
 		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
 		if url := broker.WebURL(); url != "" {
@@ -156,6 +163,10 @@ func runSandbox() int {
 		// Namespace isolation
 		"--die-with-parent",
 	)
+	// Expose the shared git dir for linked worktrees. Must come after the
+	// home --tmpfs so bwrap creates the mountpoint inside the tmpfs, the
+	// same ordering homeMounts relies on for dotfiles.
+	args = append(args, gitMounts...)
 	if broker != nil {
 		// Bind broker.sock to /run/bwai/broker.sock and the helper
 		// binary to /run/bwai/bin/bwai-outside. approve.sock is

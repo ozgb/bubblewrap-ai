@@ -100,3 +100,90 @@ func gpuMounts() []string {
 	}
 	return args
 }
+
+// readGitdirPointer reads a linked-worktree ".git" *file* and returns the
+// absolute path it points at via its `gitdir: <path>` line. A relative
+// <path> is resolved against the worktree root (the dir holding the .git
+// file). Returns "" if the file isn't a gitdir pointer.
+func readGitdirPointer(dotGitFile string) string {
+	data, err := os.ReadFile(dotGitFile)
+	if err != nil {
+		return ""
+	}
+	const prefix = "gitdir:"
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		p := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		if p == "" {
+			return ""
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(filepath.Dir(dotGitFile), p)
+		}
+		return filepath.Clean(p)
+	}
+	return ""
+}
+
+// resolveCommonDir returns the shared git common dir for a worktree gitdir.
+// It reads <gitDir>/commondir (a relative path against gitDir); absent that
+// file, gitDir is itself the common dir.
+func resolveCommonDir(gitDir string) string {
+	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return gitDir
+	}
+	p := strings.TrimSpace(string(data))
+	if p == "" {
+		return gitDir
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(gitDir, p)
+	}
+	return filepath.Clean(p)
+}
+
+// isWithin reports whether child is parent itself or nested under it.
+func isWithin(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
+}
+
+// gitWorktreeMounts exposes the shared git dir for a linked worktree so git
+// can resolve its real repo from inside the sandbox. When currentDir is an
+// ordinary checkout (.git is a directory) or not a git repo at all, it
+// returns nil — the existing currentDir bind already covers those.
+//
+// The shared common dir holds objects, refs, AND the per-worktree gitdir
+// nested under .git/worktrees/, so a single rw bind makes git behave exactly
+// as in a normal checkout. The gitdir is only mounted separately in the rare
+// case it lives outside the common dir (relocated/separate gitdir).
+func gitWorktreeMounts(currentDir string) []string {
+	dotGit := filepath.Join(currentDir, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil || info.IsDir() {
+		return nil
+	}
+	gitDir := readGitdirPointer(dotGit)
+	if gitDir == "" {
+		return nil
+	}
+	commonDir := resolveCommonDir(gitDir)
+
+	var args []string
+	if _, err := os.Stat(commonDir); err == nil {
+		args = append(args, rwBind(commonDir)...)
+	}
+	if !isWithin(commonDir, gitDir) {
+		if _, err := os.Stat(gitDir); err == nil {
+			args = append(args, rwBind(gitDir)...)
+		}
+	}
+	return args
+}
