@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 )
 
@@ -33,11 +34,24 @@ type Config struct {
 // BrokerConfig is the nested broker.* block. Disabled by default;
 // `rules: []` means everything is denied.
 type BrokerConfig struct {
-	Enabled          bool     `json:"enabled"`
-	Prompt           []string `json:"prompt"`
-	ApprovalTimeoutS int      `json:"approval_timeout_s"`
-	Rules            []Rule   `json:"rules"`
+	Enabled          bool      `json:"enabled"`
+	Prompt           []string  `json:"prompt"`
+	ApprovalTimeoutS int       `json:"approval_timeout_s"`
+	Rules            []Rule    `json:"rules"`
+	Web              WebConfig `json:"web"`
 }
+
+// WebConfig configures the loopback HTTP approval page used by the
+// "web" prompt mode. Addr is the bind address; it must resolve to a
+// loopback host (validated in loadConfig) so the page is never exposed
+// beyond this machine. The default ":0" picks an ephemeral port, one
+// per bwai instance — mirroring the per-PID tmpdir multi-instance story.
+type WebConfig struct {
+	Addr string `json:"addr"`
+}
+
+// defaultWebAddr binds the approval page to an ephemeral loopback port.
+const defaultWebAddr = "127.0.0.1:0"
 
 func defaultConfig() Config {
 	return Config{
@@ -112,6 +126,7 @@ func defaultConfig() Config {
 			Prompt:           []string{"oob"},
 			ApprovalTimeoutS: defaultApprovalTimeoutSec,
 			Rules:            []Rule{},
+			Web:              WebConfig{Addr: defaultWebAddr},
 		},
 	}
 }
@@ -141,7 +156,52 @@ func loadConfig(path string) (cfg Config, err error) {
 			return cfg, fmt.Errorf("broker.rules[%d]: %w", i, rerr)
 		}
 	}
+	// The web approval page is reachable from the sandbox (it shares the
+	// host network namespace), so the token is the only authorizer.
+	// Refuse to even start if the bind address isn't loopback — defence
+	// in depth against accidentally exposing approvals to the LAN.
+	if cfg.Broker.Enabled && cfg.Broker.webApprove() {
+		if cfg.Broker.Web.Addr == "" {
+			cfg.Broker.Web.Addr = defaultWebAddr
+		}
+		if verr := validateWebAddr(cfg.Broker.Web.Addr); verr != nil {
+			return cfg, fmt.Errorf("broker.web.addr: %w", verr)
+		}
+	}
 	return cfg, nil
+}
+
+// validateWebAddr rejects any bind address that does not resolve to a
+// loopback host. "localhost" is accepted; bare ports, wildcard hosts,
+// and routable IPs are not.
+func validateWebAddr(addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%q is not a valid host:port: %w", addr, err)
+	}
+	if host == "" {
+		return fmt.Errorf("%q must name a loopback host (e.g. 127.0.0.1)", addr)
+	}
+	if host == "localhost" {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("host %q is not a loopback address", host)
+	}
+	return nil
+}
+
+// webApprove reports whether the loopback web approval page is enabled —
+// i.e. "web" is in the configured prompt stack. Off by default; opt in
+// by adding "web" to broker.prompt.
+func (c BrokerConfig) webApprove() bool {
+	for _, m := range c.Prompt {
+		if m == "web" {
+			return true
+		}
+	}
+	return false
 }
 
 // Package-level vars set in main()
