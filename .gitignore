@@ -24,9 +24,6 @@ vendor/
 /bin/
 /dist/
 
-# Dependency directories
-/go.sum
-
 # IDE / editor
 .idea/
 .vscode/

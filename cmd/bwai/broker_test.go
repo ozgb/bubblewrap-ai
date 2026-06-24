@@ -12,11 +12,13 @@ import (
 	"time"
 )
 
-// startTestBroker spins up a broker against a per-test tmpdir and
-// returns it. Closes itself via t.Cleanup. We override the on-disk
-// layout by setting the broker's tmp dir to a per-test path; the
-// production path uses /tmp/bwai-$PID, but tests need isolation.
-func startTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
+// newTestBroker builds a broker against a per-test tmpdir without
+// starting its accept loops, so a test can inject fields (e.g. a fake
+// desktopNotifier) before calling Serve. Closes itself via t.Cleanup.
+// We override the on-disk layout by setting the broker's tmp dir to a
+// per-test path; the production path uses /tmp/bwai-$PID, but tests need
+// isolation.
+func newTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
 	t.Helper()
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "bin"), 0o700); err != nil {
@@ -52,11 +54,19 @@ func startTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker 
 		approveLn:  approveLn,
 		tmpDir:     tmpDir,
 		pending:    map[string]*pendingRequest{},
+		notifByID:  map[uint32]*pendingRequest{},
 	}
-	go b.Serve()
 	t.Cleanup(func() {
 		_ = b.Close()
 	})
+	return b
+}
+
+// startTestBroker builds a broker and starts its accept loops.
+func startTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
+	t.Helper()
+	b := newTestBroker(t, cfg, projectDir)
+	go b.Serve()
 	return b
 }
 
@@ -565,6 +575,152 @@ func TestBroker_MultiBroker_ApproverRoutesPerSocket(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatal("client never returned")
 		}
+	}
+}
+
+// captureNotifier swaps the package notifier for one that records
+// invocations on a channel, restoring the original via t.Cleanup.
+func captureNotifier(t *testing.T) <-chan [2]string {
+	t.Helper()
+	ch := make(chan [2]string, 8)
+	orig := notifier
+	notifier = func(summary, body string) { ch <- [2]string{summary, body} }
+	t.Cleanup(func() { notifier = orig })
+	return ch
+}
+
+// decideFirstPending polls sockPath until exactly one request is queued,
+// then posts decision for it. Returns the id it acted on.
+func decideFirstPending(t *testing.T, sockPath, decision string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("unix", sockPath)
+		if err != nil {
+			t.Fatalf("dial approve: %v", err)
+		}
+		_ = json.NewEncoder(conn).Encode(approverRequest{Op: "list"})
+		var reply approverReply
+		_ = json.NewDecoder(conn).Decode(&reply)
+		if len(reply.Pending) == 1 {
+			id := reply.Pending[0].ID
+			_ = json.NewEncoder(conn).Encode(approverRequest{Op: "decide", ID: id, Decision: decision})
+			var dreply approverReply
+			_ = json.NewDecoder(conn).Decode(&dreply)
+			conn.Close()
+			return id
+		}
+		conn.Close()
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("never saw a single pending request")
+	return ""
+}
+
+// TestBroker_ConfirmFiresDesktopNotification verifies the out-of-band
+// approver nudges the host: a confirm request with "oob" in the prompt
+// stack fires a desktop notification naming the command, then resolves
+// normally once approved.
+func TestBroker_ConfirmFiresDesktopNotification(t *testing.T) {
+	notes := captureNotifier(t)
+	projectDir := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled:          true,
+		Prompt:           []string{"oob"},
+		ApprovalTimeoutS: 5,
+		Rules:            []Rule{{Match: []string{"echo", "notifyme"}, Action: ActionConfirm}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+
+	resCh := make(chan []brokerFrame, 1)
+	go func() {
+		resCh <- sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+			V: 1, Argv: []string{"echo", "notifyme"}, Cwd: projectDir,
+		})
+	}()
+
+	select {
+	case n := <-notes:
+		summary, body := n[0], n[1]
+		if summary == "" {
+			t.Error("empty notification summary")
+		}
+		if !strings.Contains(body, "echo notifyme") {
+			t.Errorf("notification body = %q, want it to name the command", body)
+		}
+		if !strings.Contains(body, projectDir) {
+			t.Errorf("notification body = %q, want it to name the project dir", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no desktop notification fired for confirm request")
+	}
+
+	// Approve so the in-flight client returns cleanly before the test ends.
+	decideFirstPending(t, b.ApproveSocketPath(), "approve")
+	select {
+	case <-resCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never returned")
+	}
+}
+
+// TestBroker_AutoAllowDoesNotNotify pins that the notification is scoped
+// to the confirm/approval path — auto_allow runs immediately and must
+// not nudge the host, even with "oob" enabled.
+func TestBroker_AutoAllowDoesNotNotify(t *testing.T) {
+	notes := captureNotifier(t)
+	projectDir := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled: true,
+		Prompt:  []string{"oob"},
+		Rules:   []Rule{{Match: []string{"echo", "hi"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+	frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"echo", "hi"}, Cwd: projectDir,
+	})
+	if _, _, exit := collectStreams(t, frames); exit == nil || *exit != 0 {
+		t.Fatalf("exit = %v, want 0", exit)
+	}
+	select {
+	case n := <-notes:
+		t.Fatalf("auto_allow should not notify, got %+v", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestBroker_ConfirmWithoutOobDoesNotNotify verifies the gate: a confirm
+// still prompts via approve.sock, but with "oob" absent from the prompt
+// stack no desktop notification fires.
+func TestBroker_ConfirmWithoutOobDoesNotNotify(t *testing.T) {
+	notes := captureNotifier(t)
+	projectDir := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled:          true,
+		Prompt:           []string{"gui"}, // no "oob"
+		ApprovalTimeoutS: 5,
+		Rules:            []Rule{{Match: []string{"echo", "silent"}, Action: ActionConfirm}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+
+	resCh := make(chan []brokerFrame, 1)
+	go func() {
+		resCh <- sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+			V: 1, Argv: []string{"echo", "silent"}, Cwd: projectDir,
+		})
+	}()
+
+	// The request still enqueues for approval; approve it once it lands.
+	decideFirstPending(t, b.ApproveSocketPath(), "approve")
+	select {
+	case <-resCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client never returned")
+	}
+	select {
+	case n := <-notes:
+		t.Fatalf("confirm without oob should not notify, got %+v", n)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
