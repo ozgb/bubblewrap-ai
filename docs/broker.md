@@ -127,13 +127,60 @@ When a request arrives at the broker:
 
 | Mode | Trigger | UX |
 |---|---|---|
-| `tmux` | `$TMUX` is set | `tmux display-popup -E -- bwai approve --id $id`. Popup overlays the user's tmux session; the agent's pane is untouched. |
-| `gui` | `$DISPLAY` or `$WAYLAND_DISPLAY` set, `zenity` on `$PATH` | `zenity --question --text=...` |
+| `tmux` | `$TMUX` is set | `tmux display-popup -E -- bwai approve --id $id`. Popup overlays the user's tmux session; the agent's pane is untouched. (Not yet wired.) |
+| `web` | `"web"` in `broker.prompt` and a session D-Bus bus is reachable | Rich desktop notification with **Approve** / **Deny** / **Open page** buttons. Approve/Deny resolve straight from the toast (trusted — the session bus is host-only). **Open** (or clicking the toast body) launches a token-protected loopback web page with the full request view and the *always-this-session* option. See [Web approval](#web-approval). |
+| `gui` | `$DISPLAY` or `$WAYLAND_DISPLAY` set, `zenity` on `$PATH` | `zenity --question --text=...` (Not yet wired; the `web` mode covers the graphical case via D-Bus.) |
 | `oob` | always available | stderr notice + `notify-send`. User runs `bwai approve` in a second terminal, which connects to `approve.sock` and walks them through pending requests. |
 
 First mode whose trigger is satisfied wins. Configurable via
-`broker.prompt`: an ordered list, e.g. `["tmux", "gui", "oob"]`. Users can
-restrict the stack (e.g. `["oob"]` to force out-of-band).
+`broker.prompt`: an ordered list, e.g. `["web", "oob"]`. Users can
+restrict the stack (e.g. `["oob"]` to force out-of-band). The default
+is `["oob"]`, so `web` is strictly opt-in. In every case `bwai approve`
+on `approve.sock` remains available — `web` and `oob` only add a
+shortcut, they never replace the CLI, which is the only headless/SSH
+path.
+
+### Web approval
+
+When `"web"` is in `broker.prompt`, the broker starts a loopback HTTP
+server (`broker.web.addr`, default `127.0.0.1:0` — an ephemeral
+per-instance port) and, if a session D-Bus bus is reachable, posts a
+rich notification when a confirm request lands. The notification carries
+action buttons:
+
+- **Approve** / **Deny** — resolve the request directly from the toast.
+- **Open page** (and clicking the toast body) — open
+  `http://<addr>/r/<id>?k=<token>` in the browser. The page shows the
+  command, project, cwd, and age, with Approve / Deny / **Always this
+  session** buttons that `POST` the decision back.
+
+If no session bus is reachable (headless / SSH), the broker degrades to
+the `oob` `notify-send` nudge (if `"oob"` is also in the stack) and
+`bwai approve` still works.
+
+#### Why two trust models
+
+The sandbox is launched **without** `--unshare-net`, so it shares the
+host network namespace and can reach any `127.0.0.1:PORT` the broker
+binds — including the approval server. Two boundaries keep the agent
+from self-approving:
+
+- **D-Bus session bus is host-only.** `DBUS_SESSION_BUS_ADDRESS` is not
+  in `env_allow`, and `/run` is a tmpfs *inside* the sandbox, so the bus
+  socket is unreachable from the sandbox. Toast `ActionInvoked` events
+  are therefore **trusted** and resolve with no token.
+- **HTTP loopback is sandbox-reachable**, so every web mutation is
+  gated on a **single-use, 128-bit per-request token** (constant-time
+  compared). The token travels *only* in the URL embedded in the
+  host-side notification — it never enters the sandbox. Mutations are
+  `POST`-only so a link prefetch or `GET` can't approve anything, and
+  the bind address is validated to be loopback (config load fails
+  otherwise — defence in depth against exposing approvals to the LAN).
+
+The token is single-use: `resolve()` is `sync.Once`-guarded and the
+pending entry is deleted once the request returns, so a replayed `POST`
+gets a `404`. Knowing a request id (8 hex chars) is useless without the
+128-bit token.
 
 All approvers connect to `approve.sock` — the popup, the GUI dialog
 wrapper, and the manual `bwai approve` invocation are all just clients of
@@ -315,11 +362,13 @@ Aim for the smallest end-to-end thing that proves the design:
 - [x] Glob patterns (`*` and `**`). `argv[0]` is always literal; `**` is only valid as the final token.
 - [x] `bwai broker check` dry-run
 - [x] Output streaming
+- [x] `oob` desktop notification — `notify-send` nudge when a confirm request becomes pending (gated on `"oob"` in `broker.prompt`; best-effort, no-ops if `notify-send` is absent)
+- [x] `web` approver — rich D-Bus notification (Approve/Deny/Open buttons) plus a token-protected loopback web approval page (gated on `"web"` in `broker.prompt`; degrades to `oob` when no session bus is reachable). First third-party dependency: `github.com/godbus/dbus/v5`.
 
 Follow-ups, in roughly that order:
 
-- [ ] tmux `display-popup` approver — `broker.prompt` is parsed but only `"oob"` is honored
-- [ ] zenity / kdialog approver
+- [ ] tmux `display-popup` approver — `broker.prompt` is parsed; `oob` (notify-send) and `web` (D-Bus + web page) modes are honored, but `tmux` is not yet wired
+- [ ] zenity / kdialog approver — largely subsumed by the `web` mode's D-Bus toast for graphical sessions; a synchronous dialog fallback is still open
 - [ ] Pty passthrough
 
 ### Implementation decisions worth recording

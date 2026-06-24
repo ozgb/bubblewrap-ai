@@ -218,6 +218,37 @@ $ bwai approve
 approved.
 ```
 
+When a `confirm` request lands, the host also fires a desktop notification (via `notify-send`) so you know to run `bwai approve` without watching the terminal. This is part of the `oob` approver and is on by default; drop `"oob"` from `broker.prompt` to opt out, or it silently no-ops if `notify-send` isn't installed.
+
+### One-click approval (`web` mode)
+
+Add `"web"` to `broker.prompt` for a richer host-side flow on graphical sessions:
+
+```json
+{
+  "broker": {
+    "enabled": true,
+    "prompt": ["web", "oob"],
+    "web": { "addr": "127.0.0.1:0" },
+    "rules": [ { "match": ["git", "push", "**"], "action": "confirm" } ]
+  }
+}
+```
+
+Now a `confirm` request raises a desktop notification (over D-Bus) with **Approve** / **Deny** / **Open page** buttons:
+
+- **Approve** / **Deny** resolve the request straight from the toast.
+- **Open page** (or clicking the toast body) opens a small loopback web page showing the command, project, cwd, and age, with an extra **Always this session** button.
+
+The page is served on a loopback-only ephemeral port (`web.addr`, default `127.0.0.1:0`). `bwai` prints the base URL on startup.
+
+**Security model.** The sandbox shares the host network namespace (bwrap runs without `--unshare-net`), so the agent *can* reach that loopback port. Two things stop it from approving its own requests:
+
+- Every web decision requires a **single-use, 128-bit per-request token**. The token lives only in the URL embedded in the desktop notification — it never enters the sandbox — and mutations are `POST`-only. Guessing a request id is useless without the token.
+- The toast's Approve/Deny buttons need no token because the **D-Bus session bus is host-only**: `DBUS_SESSION_BUS_ADDRESS` isn't passed into the sandbox and `/run` is a tmpfs there, so the agent can't reach the bus to forge a click.
+
+`web.addr` is validated to be a loopback address; `bwai` refuses to start otherwise. Headless or over SSH (no session bus), `web` mode degrades to the `oob` `notify-send` nudge, and `bwai approve` always works — the CLI is the headless fallback, never replaced.
+
 `always-this-session` adds the exact argv to an in-memory allowlist for the lifetime of this `bwai` process. Never persisted.
 
 The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, argv, cwd, matched rule, decision, exit code.

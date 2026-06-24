@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,11 +74,13 @@ const (
 // decision. The decision chan is closed by the approver path.
 type pendingRequest struct {
 	id       string
+	token    string // single-use secret authorizing a web decision
 	req      brokerRequest
 	matchIdx int
 	enqueued time.Time
-	decision chan string // "approve" | "deny"
+	decision chan string // "approve" | "deny" | "always"
 	once     sync.Once
+	notifID  uint32 // D-Bus notification id, 0 if none was posted
 }
 
 // resolve delivers a decision to the waiting request exactly once.
@@ -93,15 +96,25 @@ func (p *pendingRequest) resolve(decision string) {
 // approver client) and serializes confirm prompts through a pending
 // queue.
 type Broker struct {
-	cfg         BrokerConfig
-	projectDir  string
-	auditLog    *auditLogger
-	brokerLn    net.Listener
-	approveLn   net.Listener
+	cfg        BrokerConfig
+	projectDir string
+	auditLog   *auditLogger
+	brokerLn   net.Listener
+	approveLn  net.Listener
+	// httpLn / baseURL back the "web" prompt mode: a loopback HTTP
+	// server serving the token-protected approval page. Both are zero
+	// when web mode is off.
+	httpLn  net.Listener
+	baseURL string
+	// dbus posts rich desktop notifications with Approve/Deny/Open
+	// buttons. nil when web mode is off or no session bus is reachable
+	// (headless) — the broker degrades to the oob notify-send nudge.
+	dbus        desktopNotifier
 	tmpDir      string
 	mu          sync.Mutex
 	pending     map[string]*pendingRequest
-	sessAllow   [][]string // per-session "always-this-session" allowlist
+	notifByID   map[uint32]*pendingRequest // D-Bus notification id → request
+	sessAllow   [][]string                 // per-session "always-this-session" allowlist
 	confirmHist []time.Time
 }
 
@@ -155,7 +168,7 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string) (*Broker, 
 		cfg.ApprovalTimeoutS = defaultApprovalTimeoutSec
 	}
 
-	return &Broker{
+	b := &Broker{
 		cfg:        cfg,
 		projectDir: projectDir,
 		auditLog:   audit,
@@ -163,7 +176,32 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string) (*Broker, 
 		approveLn:  approveLn,
 		tmpDir:     tmpDir,
 		pending:    map[string]*pendingRequest{},
-	}, nil
+		notifByID:  map[uint32]*pendingRequest{},
+	}
+
+	// "web" prompt mode: bind a loopback HTTP server for the approval
+	// page and, if a session bus is reachable, a D-Bus notifier for the
+	// rich toast. Everything here is best-effort — a failed loopback
+	// bind or a missing session bus (headless/SSH) degrades to the oob
+	// nudge, and `bwai approve` works regardless. The address was
+	// already validated as loopback at config load.
+	if cfg.webApprove() {
+		addr := cfg.Web.Addr
+		if addr == "" {
+			addr = defaultWebAddr
+		}
+		if httpLn, lerr := net.Listen("tcp", addr); lerr != nil {
+			fmt.Fprintf(os.Stderr, "bwai: web approval disabled (listen %q failed: %v); falling back to oob/CLI\n", addr, lerr)
+		} else {
+			b.httpLn = httpLn
+			b.baseURL = "http://" + httpLn.Addr().String()
+			if n, derr := newDBUSNotifier(); derr == nil {
+				b.dbus = n
+			}
+		}
+	}
+
+	return b, nil
 }
 
 // TmpDir is the host-side path bind-mounted into the sandbox at
@@ -182,8 +220,13 @@ func (b *Broker) ApproveSocketPath() string {
 	return filepath.Join(b.tmpDir, "approve.sock")
 }
 
-// Serve runs both accept loops until Close is called. Returns when both
-// listeners are closed.
+// WebURL is the base URL of the loopback approval server, or "" when
+// web mode is off. The per-request page lives at <WebURL>/r/<id>?k=<token>.
+func (b *Broker) WebURL() string { return b.baseURL }
+
+// Serve runs the accept loops until Close is called. Returns when all
+// listeners are closed. With web mode on it also serves the loopback
+// approval page and pumps D-Bus notification actions.
 func (b *Broker) Serve() {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -195,6 +238,21 @@ func (b *Broker) Serve() {
 		defer wg.Done()
 		b.serveApprover()
 	}()
+	if b.httpLn != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Returns ErrClosed once Close shuts the listener down.
+			_ = http.Serve(b.httpLn, b.approvalHandler())
+		}()
+	}
+	if b.dbus != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.pumpNotifications()
+		}()
+	}
 	wg.Wait()
 }
 
@@ -209,6 +267,17 @@ func (b *Broker) Close() error {
 	}
 	if b.approveLn != nil {
 		if err := b.approveLn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if b.httpLn != nil {
+		if err := b.httpLn.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if b.dbus != nil {
+		// Closing the bus connection ends the action pump goroutine.
+		if err := b.dbus.Shutdown(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -316,6 +385,7 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 func (b *Broker) awaitApproval(req brokerRequest, matchIdx int, enc *json.Encoder) string {
 	p := &pendingRequest{
 		id:       newRequestID(),
+		token:    newToken(),
 		req:      req,
 		matchIdx: matchIdx,
 		enqueued: time.Now(),
@@ -327,12 +397,23 @@ func (b *Broker) awaitApproval(req brokerRequest, matchIdx int, enc *json.Encode
 	defer func() {
 		b.mu.Lock()
 		delete(b.pending, p.id)
+		notifID := p.notifID
+		if notifID != 0 {
+			delete(b.notifByID, notifID)
+		}
 		b.mu.Unlock()
+		// Dismiss the toast however the request resolved (toast, web,
+		// CLI, or timeout) so stale notifications don't linger.
+		if notifID != 0 && b.dbus != nil {
+			_ = b.dbus.Close(notifID)
+		}
 	}()
 
 	if err := enc.Encode(brokerFrame{Type: frameTypePending, ID: p.id}); err != nil {
 		return "deny"
 	}
+
+	b.notifyApprover(p)
 
 	select {
 	case d := <-p.decision:
@@ -612,6 +693,52 @@ func newRequestID() string {
 	var buf [4]byte
 	_, _ = rand.Read(buf[:])
 	return hex.EncodeToString(buf[:])
+}
+
+// newToken mints the single-use secret that authorizes a web decision.
+// 128 bits of entropy → 32 hex chars, big enough that the sandbox can't
+// guess or brute-force it even though it can reach the loopback port.
+func newToken() string {
+	var buf [16]byte
+	_, _ = rand.Read(buf[:])
+	return hex.EncodeToString(buf[:])
+}
+
+// urlFor builds the token-protected approval URL for a pending request.
+// Returns "" when web mode is off (no base URL bound).
+func (b *Broker) urlFor(p *pendingRequest) string {
+	if b.baseURL == "" {
+		return ""
+	}
+	return b.baseURL + "/r/" + p.id + "?k=" + p.token
+}
+
+// notifyApprover fires the best-effort host-side nudge for a pending
+// confirm request. With web mode on and a session bus reachable it
+// posts a rich D-Bus toast (Approve/Deny/Open) linking to the
+// token-protected page; otherwise it falls back to the oob notify-send
+// nudge. Either way `bwai approve` remains available — this only adds a
+// shortcut, it never gates approval.
+func (b *Broker) notifyApprover(p *pendingRequest) {
+	if b.cfg.webApprove() && b.dbus != nil {
+		url := b.urlFor(p)
+		summary, body := webNotification(p.req.Argv, b.projectDir, url)
+		// Action pairs: id, label. "default" fires on body click.
+		actions := []string{"default", "", "approve", "Approve", "deny", "Deny", "open", "Open page"}
+		id, err := b.dbus.Notify(summary, body, url, actions, int32(b.cfg.ApprovalTimeoutS*1000))
+		if err == nil {
+			b.mu.Lock()
+			p.notifID = id
+			b.notifByID[id] = p
+			b.mu.Unlock()
+			return
+		}
+		// D-Bus send failed — degrade to the oob nudge below.
+	}
+	if b.cfg.oobNotify() {
+		summary, body := pendingNotification(p.req.Argv, b.projectDir)
+		notifier(summary, body)
+	}
 }
 
 func isClosedConn(err error) bool {

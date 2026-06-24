@@ -112,6 +112,9 @@ func runSandbox() int {
 	fmt.Printf("bwai: sandboxed in %s\n", currentDir)
 	if broker != nil {
 		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
+		if url := broker.WebURL(); url != "" {
+			fmt.Printf("bwai: web approval enabled on %s — per-request links arrive via desktop notification.\n", url)
+		}
 	}
 	args := []string{
 		// Clear the inherited environment; only whitelisted vars are passed through below
