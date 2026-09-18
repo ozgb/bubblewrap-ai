@@ -43,6 +43,30 @@ func TestValidateWebAddr(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigSupportsCommandCode pins the command-code wiring:
+// ~/.commandcode must be writable in the sandbox (auth, sessions, taste,
+// file history) and its env knobs must pass through.
+func TestDefaultConfigSupportsCommandCode(t *testing.T) {
+	cfg := defaultConfig()
+	if !containsSequence(cfg.HomeAllow, ".commandcode") {
+		t.Errorf("home_allow = %v, want it to include .commandcode", cfg.HomeAllow)
+	}
+	for _, key := range []string{"COMMAND_CODE_API_KEY", "COMMANDCODE_API_URL", "CMD_LOCAL_ONLY"} {
+		if !containsSequence(cfg.EnvAllow, key) {
+			t.Errorf("env_allow = %v, want it to include %s", cfg.EnvAllow, key)
+		}
+	}
+}
+
+// TestDefaultConfigIncludesGoBin pins that ~/go/bin — where `go install`
+// drops binaries — is exposed. It lives outside a dotdir, so unlike
+// ~/.cargo it is not even read-only mounted unless named explicitly.
+func TestDefaultConfigIncludesGoBin(t *testing.T) {
+	if cfg := defaultConfig(); !containsSequence(cfg.HomeAllow, "go/bin") {
+		t.Errorf("home_allow = %v, want it to include go/bin", cfg.HomeAllow)
+	}
+}
+
 // TestLoadConfigRejectsNonLoopbackWebAddr pins the defence-in-depth gate:
 // enabling web mode with a routable bind address must fail to load.
 func TestLoadConfigRejectsNonLoopbackWebAddr(t *testing.T) {

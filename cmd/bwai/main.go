@@ -101,7 +101,12 @@ func runSandbox() int {
 			return 1
 		}
 		if err := installAgentMemoryFile(broker.TmpDir()); err != nil {
-			fmt.Fprintf(os.Stderr, "bwai: install CLAUDE.md: %v\n", err)
+			fmt.Fprintf(os.Stderr, "bwai: install agent memory: %v\n", err)
+			_ = broker.Close()
+			return 1
+		}
+		if err := installBwaiMod(broker.TmpDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai: install command-code mod: %v\n", err)
 			_ = broker.Close()
 			return 1
 		}
@@ -122,6 +127,7 @@ func runSandbox() int {
 		if url := broker.WebURL(); url != "" {
 			fmt.Printf("bwai: web approval enabled on %s — per-request links arrive via desktop notification.\n", url)
 		}
+		fmt.Println("bwai: command-code can load the bwai context with `cmd --mod /run/bwai/bwai.ts`.")
 	}
 	args := []string{
 		// Clear the inherited environment; only whitelisted vars are passed through below
@@ -170,14 +176,14 @@ func runSandbox() int {
 	if broker != nil {
 		// Bind broker.sock to /run/bwai/broker.sock and the helper
 		// binary to /run/bwai/bin/bwai-outside. approve.sock is
-		// *not* bind-mounted — it's host-only. CLAUDE.md is exposed
-		// so an agent started with `--add-dir /run/bwai` (and
-		// CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1) learns
-		// about bwai-outside from its memory bootstrap.
+		// *not* bind-mounted — it's host-only. The context fragment
+		// and mod are exposed read-only so an agent can opt into
+		// them without bwai writing to the agent's own config.
 		args = append(args,
 			"--bind", broker.BrokerSocketPath(), "/run/bwai/broker.sock",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bin", "bwai-outside"), "/run/bwai/bin/bwai-outside",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
+			"--ro-bind", filepath.Join(broker.TmpDir(), "bwai.ts"), "/run/bwai/bwai.ts",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
 			"--setenv", "PATH", os.Getenv("PATH")+":/run/bwai/bin",
 		)
@@ -283,12 +289,48 @@ via ` + "`bwai approve`" + ` on the host. Output from approved commands streams
 back as it would from a normal shell.
 `
 
-// installAgentMemoryFile writes the CLAUDE.md fragment into the
-// broker tmpdir. It's bind-mounted into the sandbox at
-// /run/bwai/CLAUDE.md.
+// installAgentMemoryFile writes the CLAUDE.md fragment into the broker
+// tmpdir. It's bind-mounted into the sandbox at /run/bwai/CLAUDE.md,
+// where Claude Code picks it up via `--add-dir /run/bwai`, and where the
+// command-code mod below reads it.
 func installAgentMemoryFile(tmpDir string) error {
-	dstPath := filepath.Join(tmpDir, "CLAUDE.md")
-	return os.WriteFile(dstPath, []byte(agentMemoryFileContent), 0o644)
+	return os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte(agentMemoryFileContent), 0o644)
+}
+
+// bwaiModContent is a command-code mod (loaded with `cmd --mod`) whose
+// only job is to append the bwai context to the system prompt. It reads
+// the fragment from the read-only /run/bwai mount at call time, so the
+// markdown stays the single source of truth shared with Claude Code.
+//
+// A mod plays the role Claude's `--add-dir /run/bwai` does: the agent
+// opts in with a flag and bwai never writes to the agent's own config.
+// command-code has no "additional memory directories" setting —
+// subdirectory AGENTS.md only loads for files inside the project — so
+// appending the prompt is the only way to inject this without shadowing
+// the user's ~/.commandcode/AGENTS.md.
+const bwaiModContent = `import type {ModApi} from '@commandcode/harness';
+import {readFileSync} from 'node:fs';
+
+// Exposed read-only by bwai whenever the broker is enabled.
+const CONTEXT_PATH = '/run/bwai/CLAUDE.md';
+
+export default function (cmd: ModApi): void {
+	cmd.hooks({
+		appendSystemPrompt: () => {
+			try {
+				return readFileSync(CONTEXT_PATH, 'utf8');
+			} catch {
+				return undefined;
+			}
+		},
+	});
+}
+`
+
+// installBwaiMod writes the command-code mod into the broker tmpdir.
+// It's bind-mounted into the sandbox at /run/bwai/bwai.ts.
+func installBwaiMod(tmpDir string) error {
+	return os.WriteFile(filepath.Join(tmpDir, "bwai.ts"), []byte(bwaiModContent), 0o644)
 }
 
 // installBwaiOutsideHelper places a copy of the running bwai binary

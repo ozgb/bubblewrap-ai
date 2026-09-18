@@ -1,6 +1,6 @@
 # bubblewrap-ai
 
-Runs AI coding agents (Claude, Gemini, Goose) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
+Runs AI coding agents (Claude, Gemini, Goose, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
 
 ## Requirements
 
@@ -46,6 +46,7 @@ By default, `bwai` opens a sandboxed `bash` shell. From there you can launch any
 [🫧] > claude
 [🫧] > goose
 [🫧] > gemini
+[🫧] > cmd
 ```
 
 ### Running a command directly
@@ -107,7 +108,9 @@ Example `~/.bwai.json`:
     ".local/state",
     ".local/share/goose",
     ".cache",
-    ".cargo"
+    ".cargo",
+    "go/bin",
+    ".commandcode"
   ],
   "home_block": [
     ".gnupg",
@@ -154,6 +157,9 @@ Example `~/.bwai.json`:
     "OPENAI_API_KEY",
     "OPENAI_API_BASE",
     "OPENROUTER_API_KEY",
+    "COMMAND_CODE_API_KEY",
+    "COMMANDCODE_API_URL",
+    "CMD_LOCAL_ONLY",
   ]
 }
 ```
@@ -259,7 +265,17 @@ The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, arg
 
 ### Telling the agent it can call `bwai-outside`
 
-The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a CLAUDE.md fragment at `/run/bwai/CLAUDE.md` describing the tool and how to list its rules. Two pieces to wire it up on the agent side:
+The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a fragment describing the tool and how to list its rules, and exposes it read-only under `/run/bwai/`. Each agent opts in with a flag; `bwai` never writes to the agent's own config or memory files.
+
+**Command Code** reads system-prompt extensions from mods, so `bwai` exposes a tiny mod at `/run/bwai/bwai.ts` that appends the fragment. Start it with:
+
+```sh
+cmd --mod /run/bwai/bwai.ts
+```
+
+The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the single source of truth. Your own `~/.commandcode/AGENTS.md` is untouched — command-code has no "additional memory directories" setting, and its subdirectory memory only covers files inside the project, so a mod is what makes this opt-in rather than an override.
+
+**Claude Code** reads CLAUDE.md from additional directories, so `bwai` exposes the fragment at `/run/bwai/CLAUDE.md`. Two pieces to wire it up on the agent side:
 
 1. **Tell Claude Code to load memory from additional directories.** Set the env var globally (e.g. in your shell rc) or per-sandbox via the bash rcfile you point `bwai` at:
 

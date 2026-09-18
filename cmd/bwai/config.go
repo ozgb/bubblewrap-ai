@@ -96,6 +96,10 @@ func defaultConfig() Config {
 			"OPENAI_API_BASE",
 			// OpenRouter
 			"OPENROUTER_API_KEY",
+			// Command Code
+			"COMMAND_CODE_API_KEY",
+			"COMMANDCODE_API_URL",
+			"CMD_LOCAL_ONLY",
 		},
 		HomeAllow: []string{
 			".claude",
@@ -107,6 +111,8 @@ func defaultConfig() Config {
 			".local/share/goose",
 			".cache",
 			".cargo",
+			"go/bin",       // go-installed tools; ~/go is not a dotdir, so it'd otherwise be hidden
+			".commandcode", // Command Code
 		},
 		HomeBlock: []string{
 			".gnupg",
