@@ -326,18 +326,30 @@ push`. The dangerous spellings are not enumerable as patterns:
 
 Enumerating the known-bad forms reduces approval fatigue, but it is not a
 guarantee. So the commands that need a real judgement call live behind a
-**wrapper** instead of a pattern, and the broker authorizes a two-token
-argv:
+**wrapper** instead of a pattern, and the broker authorizes a short,
+literal argv:
 
 ```json
-{ "match": ["git-safe", "push"], "action": "confirm" },
-{ "match": ["git-safe", "**"],   "action": "auto_deny" }
+{ "match": ["git-safe", "push"],         "action": "auto_allow" },
+{ "match": ["git-safe", "commit", "**"], "action": "auto_allow" },
+{ "match": ["git-safe", "**"],           "action": "auto_deny" }
 ```
 
-`git-safe` is an argv[0] persona of the `bwai` binary (like
-`bwai-outside`), installed as a symlink next to it —
-`~/.local/bin/git-safe`. Inside the sandbox the agent calls
-`bwai-outside git-safe push`, which the broker runs on the host.
+`git-safe` is an argv[0] persona of the `bwai` binary, like
+`bwai-outside`. bwai binds the same copy of that binary into the sandbox
+twice — `/run/bwai/bin/bwai-outside` and `/run/bwai/bin/git-safe` — so
+neither has to exist on the host PATH. Inside the sandbox the agent calls
+`git-safe push` directly.
+
+The name means two different halves depending on where it runs. In the
+sandbox it is a **client**: it forwards `["git-safe", …]` and decides
+nothing. The **policy** runs on the host as the `bwai git-safe …`
+subcommand, which the broker resolves the request to (`hostArgv` in
+`broker.go`). That split is load-bearing rather than incidental — the
+agent can reach everything the sandbox can reach, so a check performed
+inside the sandbox would be advisory only. The rules still match the
+original argv, so the host-side mapping can never name a command the rules
+did not authorize.
 
 `git-safe push` is closed over its arguments — no flags, no refspecs, no
 remote — and enforces the policy in code:
@@ -354,6 +366,32 @@ The ancestry check is the part a deny-list cannot express: it makes a
 destructive push impossible by construction — a property of the commit
 graph — rather than by blacklisting flags.
 
+`git-safe commit` is the same bargain for a different judgement call. A
+signed commit is the whole reason an agent needs the host — the signing
+key lives in `~/.gnupg`, which the sandbox hides — but handing the broker
+raw `git commit` also hands it `--amend`, `-a`, `--no-verify`,
+`--author`, `-F`, and pathspecs. The wrapper takes only `-m <message>`,
+repeatable for extra paragraphs, and adds `-S` itself:
+
+- always signs; signing is not the caller's choice;
+- accepts no flag but `-m`, so history rewrites and hook skips are
+  unrepresentable rather than merely denied;
+- refuses a pathspec, so only what was staged can be committed;
+- refuses a detached HEAD, for the same reason push does.
+
+Because the message is an argument, this rule carries a trailing `**`
+where `push` does not. That is the one loose spot in the pattern, and the
+wrapper is what keeps it meaningful: the tail can only ever be `-m` pairs.
+
+The rules above are `auto_allow` for a reason. `confirm` is what you reach
+for when a pattern cannot express the check that matters — the human stands
+in for the missing judgement. Once that judgement lives in the wrapper, the
+prompt adds no information: an approver looking at `git-safe push` learns
+only what the rule already told them. And approval that is always granted is
+worse than no approval, because it trains the habit of approving without
+reading. The wrapper earns the stronger action by making the decision the
+human would otherwise have made.
+
 **Keep the wrapper closed.** The guarantee holds only while `git-safe`
 refuses to forward arbitrary arguments to `git`. If it ever grows a
 passthrough (`git "$@"`), the broker rule stops meaning anything.
@@ -364,7 +402,7 @@ force-update a ref over REST) and `gh repo sync --force` hard-resets a
 branch. Deny those explicitly rather than leaning on a broad `gh **` rule.
 
 ```
-$ bwai broker check git-safe push     # CONFIRM, rules[0]
+$ bwai broker check git-safe push     # AUTO_ALLOW, rules[0]
 $ bwai broker check git push --force  # AUTO_DENY (implicit — no rule)
 ```
 
@@ -420,7 +458,7 @@ Aim for the smallest end-to-end thing that proves the design:
 - [x] Output streaming
 - [x] `oob` desktop notification — `notify-send` nudge when a confirm request becomes pending (gated on `"oob"` in `broker.prompt`; best-effort, no-ops if `notify-send` is absent)
 - [x] `web` approver — rich D-Bus notification (Approve/Deny/Open buttons) plus a token-protected loopback web approval page (gated on `"web"` in `broker.prompt`; degrades to `oob` when no session bus is reachable). First third-party dependency: `github.com/godbus/dbus/v5`.
-- [x] `git-safe` wrapper — a closed-argument `git push` (current branch only, fast-forward only, never a protected branch) so the broker rule is a two-token literal instead of an unenumerable flag blacklist. argv[0] persona of the `bwai` binary, installed as a sibling symlink.
+- [x] `git-safe` wrapper — closed-argument `git push` (current branch only, fast-forward only, never a protected branch) and `git commit` (`-m` only, always `-S`, never amend/skip-hooks/pathspec), so the broker authorizes a literal argv instead of an unenumerable flag blacklist. argv[0] persona of the `bwai` binary, bind-mounted into the sandbox as `git-safe` and resolved on the host by the broker, so it is never installed on the host PATH.
 
 Follow-ups, in roughly that order:
 

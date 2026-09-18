@@ -7,10 +7,55 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestHostArgv pins the sandbox-name → host-command mapping. The point of
+// the mapping is that `git-safe` never has to be installed on the host,
+// while every other argv still goes to the PATH exactly as requested.
+func TestHostArgv(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "empty argv is left alone",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "unrelated commands are untouched",
+			in:   []string{"git", "push", "--force", "origin", "main"},
+			want: []string{"git", "push", "--force", "origin", "main"},
+		},
+		{
+			name: "git-safe resolves to the broker's own binary",
+			in:   []string{"git-safe", "push"},
+			want: []string{self, "git-safe", "push"},
+		},
+		{
+			name: "git-safe arguments are preserved",
+			in:   []string{"git-safe", "commit", "-m", "fix bug", "-m", "body"},
+			want: []string{self, "git-safe", "commit", "-m", "fix bug", "-m", "body"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hostArgv(tc.in)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("hostArgv(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
 
 // newTestBroker builds a broker against a per-test tmpdir without
 // starting its accept loops, so a test can inject fields (e.g. a fake

@@ -12,17 +12,26 @@ import (
 )
 
 func main() {
+	// Both bind-mounted helpers are the same binary under a different
+	// argv[0]; name the client after whichever one was invoked so its
+	// errors are not reported under the other's name.
+	prog := filepath.Base(os.Args[0])
+	if prog == "bwai-outside" || prog == "git-safe" {
+		outsideProg = prog
+	}
 	// argv[0] dispatch: when bwai is invoked as `bwai-outside` from
 	// inside the sandbox (via the bind-mounted helper), route to the
 	// broker client instead of the sandbox flow.
-	if filepath.Base(os.Args[0]) == "bwai-outside" {
+	if prog == "bwai-outside" {
 		os.Exit(runOutsideClient(os.Args[1:]))
 	}
-	// `git-safe` is a second argv[0] persona: a deliberately narrow git
-	// wrapper the broker can authorize with a two-token rule. Installed as
-	// a symlink next to `bwai` (see the Makefile) and run on the host.
-	if filepath.Base(os.Args[0]) == "git-safe" {
-		os.Exit(runGitSafe(os.Args[1:]))
+	// `git-safe` is a second argv[0] persona, installed next to
+	// bwai-outside under /run/bwai/bin (see the bind mounts below). It is
+	// only the client half: the policy runs on the host via the
+	// `bwai git-safe` subcommand, which is the only thing the broker
+	// resolves it to.
+	if prog == "git-safe" {
+		os.Exit(runGitSafeClient(os.Args[1:]))
 	}
 	// Host-side subcommand dispatch. Only the leading positional —
 	// flag args (`--command`, `-c`, `--version`, etc.) still belong to
@@ -33,6 +42,12 @@ func main() {
 			os.Exit(runApproveCLI(os.Args[2:]))
 		case "broker":
 			os.Exit(runBrokerCLI(os.Args[2:]))
+		case "git-safe":
+			// The host half of the git-safe wrapper. The broker runs
+			// this itself (see hostArgv); it is also reachable by hand,
+			// which is what replaced the old ~/.local/bin/git-safe
+			// symlink.
+			os.Exit(runGitSafe(os.Args[2:]))
 		}
 	}
 	os.Exit(runSandbox())
@@ -181,17 +196,30 @@ func runSandbox() int {
 	args = append(args, gitMounts...)
 	if broker != nil {
 		// Bind broker.sock to /run/bwai/broker.sock and the helper
-		// binary to /run/bwai/bin/bwai-outside. approve.sock is
-		// *not* bind-mounted — it's host-only. The context fragment
-		// and mod are exposed read-only so an agent can opt into
-		// them without bwai writing to the agent's own config.
+		// binary under /run/bwai/bin. approve.sock is *not*
+		// bind-mounted — it's host-only. The context fragment and mod
+		// are exposed read-only so an agent can opt into them without
+		// bwai writing to the agent's own config.
+		//
+		// One copy of this binary, two names: the sandbox picks its
+		// persona from argv[0], so binding the same regular file at both
+		// destinations gives the agent `bwai-outside` and `git-safe`
+		// without either being installed on the host. (A symlink would be
+		// cheaper but bwrap resolves symlinks at bind time on the host,
+		// so the source has to be a real file.)
+		helper := filepath.Join(broker.TmpDir(), "bin", "bwai-outside")
 		args = append(args,
 			"--bind", broker.BrokerSocketPath(), "/run/bwai/broker.sock",
-			"--ro-bind", filepath.Join(broker.TmpDir(), "bin", "bwai-outside"), "/run/bwai/bin/bwai-outside",
+			"--ro-bind", helper, "/run/bwai/bin/bwai-outside",
+			"--ro-bind", helper, "/run/bwai/bin/git-safe",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bwai.ts"), "/run/bwai/bwai.ts",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
-			"--setenv", "PATH", os.Getenv("PATH")+":/run/bwai/bin",
+			// Prepend rather than append: these two are the sandbox's own
+			// helpers, and they must win over anything the host PATH
+			// happens to hold — a stale ~/.local/bin/git-safe from an
+			// older install would otherwise shadow the bind-mounted one.
+			"--setenv", "PATH", "/run/bwai/bin:"+os.Getenv("PATH"),
 		)
 	}
 	args = append(args, cfg.BwrapExtraArgs...)
@@ -261,15 +289,27 @@ including reading, editing, and committing — does *not* need it.
 Use ` + "`bwai-outside`" + ` when the command requires host-only state:
 
 ` + "```sh" + `
-bwai-outside git commit -S -m "fix bug"   # signed commit — needs ~/.gnupg
-bwai-outside git-safe push                # publish the current branch (fast-forward only)
-bwai-outside gh pr create                 # needs host gh auth
+bwai-outside gh pr create   # needs host gh auth
 ` + "```" + `
 
-` + "`bwai-outside git push`" + ` is deliberately not allowed. Use
-` + "`git-safe push`" + ` instead: it pushes the current branch to ` + "`origin`" + ` and
-refuses force, the protected branches (main/master/trunk/develop), and any
-non-fast-forward update.
+The two git operations that need host credentials have their own command,
+` + "`git-safe`" + `. It is already on your ` + "`PATH`" + ` — call it directly, with
+no ` + "`bwai-outside`" + ` prefix:
+
+` + "```sh" + `
+git-safe commit -m "fix bug"  # commits what is staged, GPG-signed
+git-safe push                 # publishes the current branch (fast-forward only)
+` + "```" + `
+
+` + "`bwai-outside git push`" + ` is deliberately not allowed. ` + "`git-safe push`" + `
+pushes the current branch to ` + "`origin`" + ` and refuses force, the protected
+branches (main/master/trunk/develop), and any non-fast-forward update.
+
+` + "`git-safe commit`" + ` is the signing path: it takes only ` + "`-m <message>`" + `
+(repeat it for extra paragraphs), always signs, and refuses every other
+spelling — no ` + "`--amend`" + `, no ` + "`-a`" + `, no ` + "`--no-verify`" + `, no pathspecs. Use it
+instead of ` + "`bwai-outside git commit -S`" + `, which exposes the whole flag
+surface to the broker.
 
 Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
 these all succeed inside the sandbox:
@@ -295,9 +335,10 @@ that need a credential the sandbox deliberately hides.
 If a command is denied, it isn't on the allowlist. Check
 ` + "`bwai-outside --list-rules`" + ` first rather than retrying.
 
-Commands flagged ` + "`CONFIRM`" + ` will pause until the human approves them
-via ` + "`bwai approve`" + ` on the host. Output from approved commands streams
-back as it would from a normal shell.
+Commands flagged ` + "`AUTO_ALLOW`" + ` need no approval — run them directly,
+there is nothing to wait for. ` + "`CONFIRM`" + ` commands pause until the human
+approves them via ` + "`bwai approve`" + ` on the host. Output from approved
+commands streams back as it would from a normal shell.
 `
 
 // installAgentMemoryFile writes the CLAUDE.md fragment into the broker

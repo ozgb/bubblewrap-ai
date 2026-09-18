@@ -11,22 +11,57 @@ import (
 const gitSafeUsage = `git-safe — a deliberately narrow git wrapper for the bwai broker.
 
 Usage:
-  git-safe push     Push the current branch to origin, fast-forward only.
+  git-safe push                     Push the current branch to origin, fast-forward only.
+  git-safe commit -m <message> ...  Commit staged changes, GPG-signed.
 
-git-safe accepts no flags, no refspecs, and no remote argument. It refuses
-a detached HEAD and the protected branches (main, master, trunk, develop),
-and it never performs a non-fast-forward update: origin's tip must be an
-ancestor of HEAD. The remote branch is created if it does not exist yet.
+git-safe push accepts no flags, no refspecs, and no remote argument. It
+refuses a detached HEAD and the protected branches (main, master, trunk,
+develop), and it never performs a non-fast-forward update: origin's tip
+must be an ancestor of HEAD. The remote branch is created if it does not
+exist yet.
+
+git-safe commit takes only -m <message>, repeated for extra paragraphs,
+and always signs with -S — the host's keyring is the reason to route a
+commit through the broker in the first place. Every other git commit
+spelling is refused: --amend, -a/--all, --no-verify, --author, -F, and
+bare pathspecs.
 
 The policy lives in code rather than in an allowlist pattern. The broker's
 matcher cannot express "any force flag, in any position", so commands that
-need that judgement live behind a wrapper and the broker is left to match a
-two-token argv: ["git-safe", "push"].`
+need that judgement live behind a wrapper and the broker is left to match
+a short argv: ["git-safe", "push"] or ["git-safe", "commit", "**"].`
 
 // protectedBranches may never be pushed through git-safe.
 var protectedBranches = []string{"main", "master", "trunk", "develop"}
 
-// runGitSafe is the entry point when the binary is invoked as `git-safe`.
+// runGitSafeClient is the sandbox-side half of git-safe, reached when
+// the binary is invoked as `git-safe` from inside the sandbox. The
+// policy lives on the host — the agent can reach everything the sandbox
+// can reach, so a check performed in here would be advisory only — so
+// this is a broker client, exactly like bwai-outside, with "git-safe"
+// pinned to the front so the request matches the broker's
+// ["git-safe", …] rule.
+//
+// --help is answered locally: it is pure text, and spending a broker
+// round trip (or an approval) to print a usage string would be silly.
+func runGitSafeClient(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "git-safe: missing subcommand")
+		fmt.Fprintln(os.Stderr, gitSafeUsage)
+		return 2
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Println(gitSafeUsage)
+		return 0
+	}
+	return runOutsideExec(append([]string{"git-safe"}, args...))
+}
+
+// runGitSafe is the host-side half: the `bwai git-safe …` subcommand,
+// which the broker runs on the host once a ["git-safe", …] rule matches.
+// Inside the sandbox the same name dispatches to runGitSafeClient above,
+// so the two halves never share an entry point.
 func runGitSafe(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "git-safe: missing subcommand")
@@ -36,6 +71,8 @@ func runGitSafe(args []string) int {
 	switch args[0] {
 	case "push":
 		return runGitSafePush(args[1:])
+	case "commit":
+		return runGitSafeCommit(args[1:])
 	case "-h", "--help", "help":
 		fmt.Println(gitSafeUsage)
 		return 0
@@ -128,6 +165,56 @@ func planPush(branch string, remoteExists, fastForward, hasUpstream bool) ([]str
 	// Combined with the ancestry check above, a non-fast-forward push
 	// cannot happen.
 	argv = append(argv, "origin", "HEAD:refs/heads/"+branch)
+	return argv, nil
+}
+
+// runGitSafeCommit implements `git-safe commit`. It builds the argv via
+// planCommit, which is pure and unit-tested, then refuses a detached
+// HEAD for the same reason push does: the commit would land on no
+// branch. Everything else is git's business.
+func runGitSafeCommit(args []string) int {
+	argv, err := planCommit(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
+		return 2
+	}
+	if _, err := gitOutput("symbolic-ref", "--quiet", "--short", "HEAD"); err != nil {
+		fmt.Fprintln(os.Stderr, "git-safe: refusing to commit: HEAD is detached (check out a branch first)")
+		return 1
+	}
+	return execGit(argv)
+}
+
+// planCommit is the entire policy for `git-safe commit`, kept pure so it
+// can be tested without a repository. args is everything after the
+// subcommand; the only accepted form is one or more `-m <message>`
+// pairs, and repeated -m adds paragraphs exactly as it does for git.
+//
+// Signing is not the caller's choice: the wrapper always emits -S,
+// because the host keyring the sandbox hides is the reason to route a
+// commit through the broker, and because a fixed argv is what keeps the
+// broker rule from having to describe the flags we do not want.
+func planCommit(args []string) ([]string, error) {
+	var msgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] != "-m" {
+			return nil, fmt.Errorf("refusing to commit: %q is not allowed (only -m <message> is accepted)", args[i])
+		}
+		if i+1 == len(args) {
+			return nil, fmt.Errorf("refusing to commit: -m needs a message")
+		}
+		i++
+		// The value is taken verbatim, so a message that looks like a flag
+		// ("--amend") stays a message — argv reaches git without a shell.
+		msgs = append(msgs, args[i])
+	}
+	if len(msgs) == 0 {
+		return nil, fmt.Errorf("refusing to commit: a message is required (-m <message>)")
+	}
+	argv := []string{"git", "commit", "-S"}
+	for _, m := range msgs {
+		argv = append(argv, "-m", m)
+	}
 	return argv, nil
 }
 

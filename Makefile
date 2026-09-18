@@ -21,12 +21,16 @@ build:
 install: build
 	install -d $(BINDIR)
 	install -m 0755 $(BIN_DIR)/$(BINARY) $(BINDIR)/$(BINARY)
-	ln -sf $(BINARY) $(BINDIR)/git-safe
-	@echo "installed $(BINDIR)/$(BINARY) and $(BINDIR)/git-safe"
+	@echo "installed $(BINDIR)/$(BINARY)"
 
+# git-safe is not installed on the host. It is a sandbox-side command
+# that bwai bind-mounts into /run/bwai/bin, and its host half runs as the
+# `bwai git-safe` subcommand, which the broker resolves from the bwai
+# binary itself. Older installs left a $(BINDIR)/git-safe symlink behind;
+# uninstall still cleans it up.
 uninstall:
 	rm -f $(BINDIR)/$(BINARY) $(BINDIR)/git-safe
-	@echo "removed $(BINDIR)/$(BINARY) and $(BINDIR)/git-safe"
+	@echo "removed $(BINDIR)/$(BINARY) (and any legacy git-safe symlink)"
 
 test:
 	go test ./...

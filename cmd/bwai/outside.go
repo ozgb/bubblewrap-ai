@@ -10,6 +10,13 @@ import (
 	"strings"
 )
 
+// outsideProg is the name this client reports errors under. It is set
+// from argv[0] in main, so a request made through the `git-safe` persona
+// is reported as `git-safe` rather than as the `bwai-outside` client it
+// happens to share code with. Defaults to the original name so direct
+// calls (tests) and the bwai-outside persona are unchanged.
+var outsideProg = "bwai-outside"
+
 // runOutsideClient is the entry point used when bwai is invoked as
 // `bwai-outside` from inside the sandbox. It dispatches on the first
 // arg: introspection flags (--help, --list-rules) talk to the broker
@@ -55,26 +62,26 @@ func runOutsideHelp() int {
 func runOutsideListRules(quietHeader bool) int {
 	sockPath := os.Getenv("BWAI_BROKER_SOCKET")
 	if sockPath == "" {
-		fmt.Fprintln(os.Stderr, "bwai-outside: BWAI_BROKER_SOCKET is not set; not running inside a bwai sandbox?")
+		fmt.Fprintln(os.Stderr, outsideProg+": BWAI_BROKER_SOCKET is not set; not running inside a bwai sandbox?")
 		return 127
 	}
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai-outside: connect: %v\n", err)
+		fmt.Fprintf(os.Stderr, outsideProg+": connect: %v\n", err)
 		return 127
 	}
 	defer conn.Close()
 	if err := json.NewEncoder(conn).Encode(brokerRequest{V: 1, Op: opListRules}); err != nil {
-		fmt.Fprintf(os.Stderr, "bwai-outside: send: %v\n", err)
+		fmt.Fprintf(os.Stderr, outsideProg+": send: %v\n", err)
 		return 127
 	}
 	var fr brokerFrame
 	if err := json.NewDecoder(conn).Decode(&fr); err != nil {
-		fmt.Fprintf(os.Stderr, "bwai-outside: recv: %v\n", err)
+		fmt.Fprintf(os.Stderr, outsideProg+": recv: %v\n", err)
 		return 127
 	}
 	if fr.Type != frameTypeRules {
-		fmt.Fprintf(os.Stderr, "bwai-outside: unexpected frame %q\n", fr.Type)
+		fmt.Fprintf(os.Stderr, outsideProg+": unexpected frame %q\n", fr.Type)
 		return 127
 	}
 	if !quietHeader {
@@ -120,25 +127,25 @@ func printRules(w io.Writer, rules []Rule) {
 func runOutsideExec(argv []string) int {
 	sockPath := os.Getenv("BWAI_BROKER_SOCKET")
 	if sockPath == "" {
-		fmt.Fprintln(os.Stderr, "bwai-outside: BWAI_BROKER_SOCKET is not set; not running inside a bwai sandbox?")
+		fmt.Fprintln(os.Stderr, outsideProg+": BWAI_BROKER_SOCKET is not set; not running inside a bwai sandbox?")
 		return 127
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai-outside: cannot determine cwd: %v\n", err)
+		fmt.Fprintf(os.Stderr, outsideProg+": cannot determine cwd: %v\n", err)
 		return 127
 	}
 
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai-outside: connect: %v\n", err)
+		fmt.Fprintf(os.Stderr, outsideProg+": connect: %v\n", err)
 		return 127
 	}
 	defer conn.Close()
 
 	req := brokerRequest{V: 1, Op: opExec, Argv: argv, Cwd: cwd, StdinInherit: false}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		fmt.Fprintf(os.Stderr, "bwai-outside: send: %v\n", err)
+		fmt.Fprintf(os.Stderr, outsideProg+": send: %v\n", err)
 		return 127
 	}
 
@@ -150,13 +157,13 @@ func runOutsideExec(argv []string) int {
 			if errors.Is(err, io.EOF) {
 				return 0
 			}
-			fmt.Fprintf(os.Stderr, "bwai-outside: recv: %v\n", err)
+			fmt.Fprintf(os.Stderr, outsideProg+": recv: %v\n", err)
 			return 127
 		}
 		switch fr.Type {
 		case frameTypePending:
 			if !pendingPrinted {
-				fmt.Fprintf(os.Stderr, "bwai-outside: waiting for host approval (id %s)…\n", fr.ID)
+				fmt.Fprintf(os.Stderr, outsideProg+": waiting for host approval (id %s)…\n", fr.ID)
 				pendingPrinted = true
 			}
 		case frameTypeStdout:
@@ -169,10 +176,10 @@ func runOutsideExec(argv []string) int {
 			}
 			return *fr.Code
 		case frameTypeDenied:
-			fmt.Fprintf(os.Stderr, "bwai-outside: denied (%s); run `bwai-outside --list-rules` to see what's allowed\n", fr.Reason)
+			fmt.Fprintf(os.Stderr, outsideProg+": denied (%s); run `bwai-outside --list-rules` to see what's allowed\n", fr.Reason)
 			return 126
 		default:
-			fmt.Fprintf(os.Stderr, "bwai-outside: unknown frame type %q\n", fr.Type)
+			fmt.Fprintf(os.Stderr, outsideProg+": unknown frame type %q\n", fr.Type)
 		}
 	}
 }

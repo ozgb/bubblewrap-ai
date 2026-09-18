@@ -436,7 +436,8 @@ func (b *Broker) awaitApproval(req brokerRequest, matchIdx int, enc *json.Encode
 // until exit. Frames can interleave at chunk boundaries between
 // stdout and stderr — that matches real terminal behaviour.
 func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx int, decision string) {
-	cmd := exec.Command(req.Argv[0], req.Argv[1:]...)
+	argv := hostArgv(req.Argv)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = req.Cwd
 	cmd.Env = os.Environ() // host env, not sandbox env
 
@@ -530,6 +531,29 @@ func (b *Broker) emitStartFailure(enc *json.Encoder, req brokerRequest, matchIdx
 		Decision:    decision,
 		ExitCode:    &code,
 	})
+}
+
+// hostArgv maps a sandbox-facing command name onto this binary, so a
+// wrapper the agent calls inside the sandbox does not have to exist on
+// the host PATH. `git-safe` is the only such name: the sandbox copy is a
+// broker client, and the policy it defers to is the `git-safe`
+// subcommand of this binary, which the broker runs here on the host.
+//
+// The mapping happens after the rules have matched the original argv, so
+// it cannot name a command the rules did not authorize — the request
+// still has to look exactly like ["git-safe", …] to get this far.
+func hostArgv(argv []string) []string {
+	if len(argv) == 0 || argv[0] != "git-safe" {
+		return argv
+	}
+	self, err := os.Executable()
+	if err != nil {
+		// Degrade to a PATH lookup rather than refusing: the exec will
+		// fail loudly, which is the honest outcome, and the sandbox
+		// cannot influence whether os.Executable succeeds.
+		return argv
+	}
+	return append([]string{self, "git-safe"}, argv[1:]...)
 }
 
 // cwdAllowed enforces that the request runs inside the project bind

@@ -267,18 +267,30 @@ The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, arg
 
 Some commands are too dangerous to expose under their own name. `git push` is the motivating case: no rule pattern can catch `git push origin +main` (force by refspec), `git push origin :main` (delete by refspec), or a `--force` placed after the refspec — tokens match literally and `**` is only valid as the final token.
 
-The answer is a wrapper with a closed argument surface. `git-safe` is built from the same binary as `bwai` (installed as a symlink next to it) and exposes exactly one operation:
+The answer is a wrapper with a closed argument surface. `git-safe` is built from the same binary as `bwai` — bwai binds that one copy into the sandbox twice, so it appears beside `bwai-outside` under `/run/bwai/bin`. Nothing is installed on the host. It exposes two operations, and both are called directly, with no `bwai-outside` prefix:
 
 ```sh
-bwai-outside git-safe push
+git-safe push
+git-safe commit -m "fix bug"
 ```
 
-It pushes the current branch to `origin` and refuses everything else: no flags, no refspecs, no other remote, no detached HEAD, no protected branch (`main`/`master`/`trunk`/`develop`), and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push. That reduces the broker rule to two tokens:
+In the sandbox `git-safe` is only a client: it forwards `["git-safe", …]` to the broker and decides nothing itself. The policy runs on the host, as the `bwai git-safe` subcommand the broker resolves the request to. That split is load-bearing — the agent can reach anything the sandbox can reach, so a check performed inside the sandbox would be advisory only.
+
+`git-safe push` pushes the current branch to `origin` and refuses everything else: no flags, no refspecs, no other remote, no detached HEAD, no protected branch (`main`/`master`/`trunk`/`develop`), and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push.
+
+`git-safe commit` commits what is staged, GPG-signed. The signing key lives in the host's `~/.gnupg`, which the sandbox hides — that is the reason to route a commit through the host at all. It accepts only `-m <message>` (repeat for extra paragraphs) and adds `-S` itself, so signing is not the caller's choice; every other spelling is refused — `--amend`, `-a`/`--all`, `--no-verify`, `--author`, `-F`, and bare pathspecs. The agent cannot rewrite history or skip a hook, and the broker rule never has to describe those flags. It also refuses a detached HEAD, for the same reason `push` does.
+
+That reduces the broker rules to:
 
 ```json
-{ "match": ["git-safe", "push"], "action": "confirm" },
-{ "match": ["git-safe", "**"],   "action": "auto_deny" }
+{ "match": ["git-safe", "push"],         "action": "auto_allow" },
+{ "match": ["git-safe", "commit", "**"], "action": "auto_allow" },
+{ "match": ["git-safe", "**"],           "action": "auto_deny" }
 ```
+
+Note the action: **`auto_allow`, not `confirm`.** That is the payoff of moving the policy into the wrapper. A rule over raw `git push` needs a human because the pattern cannot express the check that matters; `git-safe` carries the check itself, so the ancestry decision is already made in code before git runs. A prompt would add nothing — an approver reading `git-safe push` learns only what the rule already told them — and an approval that is always granted is worse than none, because it trains the habit of approving without reading.
+
+`commit` needs a trailing `**` because the message is an argument — unlike `push`, it can't be a two-token rule — but the wrapper is what makes the tail safe: it accepts only `-m` pairs, so the pattern never has to enumerate the bad flags.
 
 ### Telling the agent it can call `bwai-outside`
 
