@@ -26,7 +26,13 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 	}
 	// The rules ride along in the fragment so the agent knows them before
 	// its first turn, without having to run `bwai-outside --list-rules`.
-	for _, want := range []string{"Broker rules for this sandbox", "CONFIRM", "git-safe push", "gh pr create **"} {
+	//
+	// "auto_allow" (lowercase) is the convention note, not the rendered
+	// table — printRules upper-cases the action — so it pins the prose.
+	for _, want := range []string{
+		"Broker rules for this sandbox", "CONFIRM", "git-safe push", "gh pr create **",
+		"auto_allow", "closed wrapper",
+	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CLAUDE.md missing %q:\n%s", want, s)
 		}

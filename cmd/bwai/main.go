@@ -339,6 +339,13 @@ Commands flagged ` + "`AUTO_ALLOW`" + ` need no approval — run them directly,
 there is nothing to wait for. ` + "`CONFIRM`" + ` commands pause until the human
 approves them via ` + "`bwai approve`" + ` on the host. Output from approved
 commands streams back as it would from a normal shell.
+
+Rule-set convention: ` + "`auto_allow`" + ` is preferred over ` + "`CONFIRM`" + ` for
+commands whose safety is guaranteed in code by a closed wrapper — the
+` + "`git-safe`" + ` rules are the example. A wrapper that enforces its own
+policy has already made the judgement a human would have made, so the
+prompt adds nothing and only trains the habit of approving without
+reading.
 `
 
 // installAgentMemoryFile writes the CLAUDE.md fragment into the broker
