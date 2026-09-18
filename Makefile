@@ -21,11 +21,12 @@ build:
 install: build
 	install -d $(BINDIR)
 	install -m 0755 $(BIN_DIR)/$(BINARY) $(BINDIR)/$(BINARY)
-	@echo "installed $(BINDIR)/$(BINARY)"
+	ln -sf $(BINARY) $(BINDIR)/git-safe
+	@echo "installed $(BINDIR)/$(BINARY) and $(BINDIR)/git-safe"
 
 uninstall:
-	rm -f $(BINDIR)/$(BINARY)
-	@echo "removed $(BINDIR)/$(BINARY)"
+	rm -f $(BINDIR)/$(BINARY) $(BINDIR)/git-safe
+	@echo "removed $(BINDIR)/$(BINARY) and $(BINDIR)/git-safe"
 
 test:
 	go test ./...

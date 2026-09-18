@@ -312,6 +312,62 @@ denied. README contains copy-paste fragments for common scopes
 ("read-only git", "sign and push", "ssh-agent introspection") so users
 assemble from known-good pieces rather than writing from scratch.
 
+## Restricted commands (`git-safe`)
+
+The matcher is deliberately tiny, and that is most visible around `git
+push`. The dangerous spellings are not enumerable as patterns:
+
+| Form | Why a rule can't catch it |
+|---|---|
+| `git push origin +main` | force-by-refspec; the `+` is inside a token, and tokens match literally |
+| `git push origin :main` | delete-by-empty-refspec; same problem with `:` |
+| `git push origin main --force` | `**` is only valid as the *final* token, so "flag anywhere" is unwritable |
+| `git push --force-with-lease=origin/main` | `=`-valued; a token distinct from `--force-with-lease` |
+
+Enumerating the known-bad forms reduces approval fatigue, but it is not a
+guarantee. So the commands that need a real judgement call live behind a
+**wrapper** instead of a pattern, and the broker authorizes a two-token
+argv:
+
+```json
+{ "match": ["git-safe", "push"], "action": "confirm" },
+{ "match": ["git-safe", "**"],   "action": "auto_deny" }
+```
+
+`git-safe` is an argv[0] persona of the `bwai` binary (like
+`bwai-outside`), installed as a symlink next to it —
+`~/.local/bin/git-safe`. Inside the sandbox the agent calls
+`bwai-outside git-safe push`, which the broker runs on the host.
+
+`git-safe push` is closed over its arguments — no flags, no refspecs, no
+remote — and enforces the policy in code:
+
+- refuses a detached HEAD;
+- refuses the protected branches (`main`, `master`, `trunk`, `develop`);
+- pushes only the current branch, and only to `origin`;
+- fetches the remote tip and requires it to be an **ancestor of HEAD**
+  before pushing, so a non-fast-forward update cannot happen;
+- constructs the refspec itself (`HEAD:refs/heads/<branch>`, no `+`
+  prefix, never `--force`), creating the remote branch on first push.
+
+The ancestry check is the part a deny-list cannot express: it makes a
+destructive push impossible by construction — a property of the commit
+graph — rather than by blacklisting flags.
+
+**Keep the wrapper closed.** The guarantee holds only while `git-safe`
+refuses to forward arbitrary arguments to `git`. If it ever grows a
+passthrough (`git "$@"`), the broker rule stops meaning anything.
+
+The same reasoning applies to `gh`: its subcommands are structured enough
+to match literally, but `gh api` is a universal escape hatch (it can
+force-update a ref over REST) and `gh repo sync --force` hard-resets a
+branch. Deny those explicitly rather than leaning on a broad `gh **` rule.
+
+```
+$ bwai broker check git-safe push     # CONFIRM, rules[0]
+$ bwai broker check git push --force  # AUTO_DENY (implicit — no rule)
+```
+
 ## Why not bash-style job control?
 
 The natural instinct is to model this on bash putting jobs in the
@@ -364,6 +420,7 @@ Aim for the smallest end-to-end thing that proves the design:
 - [x] Output streaming
 - [x] `oob` desktop notification — `notify-send` nudge when a confirm request becomes pending (gated on `"oob"` in `broker.prompt`; best-effort, no-ops if `notify-send` is absent)
 - [x] `web` approver — rich D-Bus notification (Approve/Deny/Open buttons) plus a token-protected loopback web approval page (gated on `"web"` in `broker.prompt`; degrades to `oob` when no session bus is reachable). First third-party dependency: `github.com/godbus/dbus/v5`.
+- [x] `git-safe` wrapper — a closed-argument `git push` (current branch only, fast-forward only, never a protected branch) so the broker rule is a two-token literal instead of an unenumerable flag blacklist. argv[0] persona of the `bwai` binary, installed as a sibling symlink.
 
 Follow-ups, in roughly that order:
 

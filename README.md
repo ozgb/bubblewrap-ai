@@ -263,9 +263,26 @@ The page is served on a loopback-only ephemeral port (`web.addr`, default `127.0
 
 The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, argv, cwd, matched rule, decision, exit code.
 
+### Restricted commands (`git-safe`)
+
+Some commands are too dangerous to expose under their own name. `git push` is the motivating case: no rule pattern can catch `git push origin +main` (force by refspec), `git push origin :main` (delete by refspec), or a `--force` placed after the refspec — tokens match literally and `**` is only valid as the final token.
+
+The answer is a wrapper with a closed argument surface. `git-safe` is built from the same binary as `bwai` (installed as a symlink next to it) and exposes exactly one operation:
+
+```sh
+bwai-outside git-safe push
+```
+
+It pushes the current branch to `origin` and refuses everything else: no flags, no refspecs, no other remote, no detached HEAD, no protected branch (`main`/`master`/`trunk`/`develop`), and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push. That reduces the broker rule to two tokens:
+
+```json
+{ "match": ["git-safe", "push"], "action": "confirm" },
+{ "match": ["git-safe", "**"],   "action": "auto_deny" }
+```
+
 ### Telling the agent it can call `bwai-outside`
 
-The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a fragment describing the tool and how to list its rules, and exposes it read-only under `/run/bwai/`. Each agent opts in with a flag; `bwai` never writes to the agent's own config or memory files.
+The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Each agent opts in with a flag; `bwai` never writes to the agent's own config or memory files.
 
 **Command Code** reads system-prompt extensions from mods, so `bwai` exposes a tiny mod at `/run/bwai/bwai.ts` that appends the fragment. Start it with:
 

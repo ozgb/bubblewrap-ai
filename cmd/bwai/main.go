@@ -18,6 +18,12 @@ func main() {
 	if filepath.Base(os.Args[0]) == "bwai-outside" {
 		os.Exit(runOutsideClient(os.Args[1:]))
 	}
+	// `git-safe` is a second argv[0] persona: a deliberately narrow git
+	// wrapper the broker can authorize with a two-token rule. Installed as
+	// a symlink next to `bwai` (see the Makefile) and run on the host.
+	if filepath.Base(os.Args[0]) == "git-safe" {
+		os.Exit(runGitSafe(os.Args[1:]))
+	}
 	// Host-side subcommand dispatch. Only the leading positional —
 	// flag args (`--command`, `-c`, `--version`, etc.) still belong to
 	// the default sandbox flow.
@@ -100,7 +106,7 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
-		if err := installAgentMemoryFile(broker.TmpDir()); err != nil {
+		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: install agent memory: %v\n", err)
 			_ = broker.Close()
 			return 1
@@ -256,9 +262,14 @@ Use ` + "`bwai-outside`" + ` when the command requires host-only state:
 
 ` + "```sh" + `
 bwai-outside git commit -S -m "fix bug"   # signed commit — needs ~/.gnupg
-bwai-outside git push                     # ssh push — needs ~/.ssh
+bwai-outside git-safe push                # publish the current branch (fast-forward only)
 bwai-outside gh pr create                 # needs host gh auth
 ` + "```" + `
+
+` + "`bwai-outside git push`" + ` is deliberately not allowed. Use
+` + "`git-safe push`" + ` instead: it pushes the current branch to ` + "`origin`" + ` and
+refuses force, the protected branches (main/master/trunk/develop), and any
+non-fast-forward update.
 
 Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
 these all succeed inside the sandbox:
@@ -293,8 +304,24 @@ back as it would from a normal shell.
 // tmpdir. It's bind-mounted into the sandbox at /run/bwai/CLAUDE.md,
 // where Claude Code picks it up via `--add-dir /run/bwai`, and where the
 // command-code mod below reads it.
-func installAgentMemoryFile(tmpDir string) error {
-	return os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte(agentMemoryFileContent), 0o644)
+//
+// The live rule set is rendered into the fragment so every agent that
+// loads it knows what the broker will and won't run before its first
+// turn — rather than depending on the model choosing to run
+// `bwai-outside -h` (which the prose below already suggests, and which
+// models routinely skip). printRules is shared with `--list-rules`, so
+// the injected view and the on-demand view cannot drift apart.
+func installAgentMemoryFile(tmpDir string, rules []Rule) error {
+	var b strings.Builder
+	b.WriteString(agentMemoryFileContent)
+	b.WriteString("\n## Broker rules for this sandbox\n\n")
+	b.WriteString("This is exactly what the broker will run, and what it will ask a\n")
+	b.WriteString("human to approve. A command matching no rule is denied, so check\n")
+	b.WriteString("here before trying something and finding out the hard way.\n\n")
+	b.WriteString("```\n")
+	printRules(&b, rules)
+	b.WriteString("```\n")
+	return os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte(b.String()), 0o644)
 }
 
 // bwaiModContent is a command-code mod (loaded with `cmd --mod`) whose
