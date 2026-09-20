@@ -106,6 +106,8 @@ func defaultConfig() Config {
 			".gemini",
 			".claude.json",
 			".config/goose",
+			".config/opencode",      // opencode config
+			".local/share/opencode", // opencode auth, sessions, state
 			".config/gcloud",
 			".local/state",
 			".local/share/goose",

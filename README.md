@@ -1,6 +1,6 @@
 # bubblewrap-ai
 
-Runs AI coding agents (Claude, Gemini, Goose, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
+Runs AI coding agents (Claude, Gemini, Goose, opencode, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
 
 ## Requirements
 
@@ -46,7 +46,7 @@ By default, `bwai` opens a sandboxed `bash` shell. From there you can launch any
 [🫧] > claude
 [🫧] > goose
 [🫧] > gemini
-[🫧] > cmd
+[🫧] > opencode
 ```
 
 ### Running a command directly
@@ -107,6 +107,8 @@ Example `~/.bwai.json`:
     ".config/gcloud",
     ".local/state",
     ".local/share/goose",
+    ".config/opencode",
+    ".local/share/opencode",
     ".cache",
     ".cargo",
     "go/bin",
@@ -294,7 +296,7 @@ Note the action: **`auto_allow`, not `confirm`.** That is the payoff of moving t
 
 ### Telling the agent it can call `bwai-outside`
 
-The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Each agent opts in with a flag; `bwai` never writes to the agent's own config or memory files.
+The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Each agent opts in with a flag (except opencode, which is injected via a config env var); `bwai` never writes to the agent's own config or memory files.
 
 **Command Code** reads system-prompt extensions from mods, so `bwai` exposes a tiny mod at `/run/bwai/bwai.ts` that appends the fragment. Start it with:
 
@@ -321,7 +323,11 @@ The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the sing
    claude --add-dir /run/bwai
    ```
 
-   Claude reads `/run/bwai/CLAUDE.md` as part of its memory bootstrap and learns it can call `bwai-outside`.
+    Claude reads `/run/bwai/CLAUDE.md` as part of its memory bootstrap and learns it can call `bwai-outside`.
+
+**opencode** needs no opt-in. When the broker is enabled `bwai` exposes a tiny config at `/run/bwai/opencode.json` and sets `OPENCODE_CONFIG` to it, so opencode loads the fragment through its [`instructions`](https://opencode.ai/docs/config/#instructions) option at startup. The env var is a config *override* — your `~/.config/opencode/opencode.json` and the project config still load, and their `instructions` are merged.
+
+Note: opencode v2 accepts `instructions` but does not load its entries; on v2, drop the fragment into an `AGENTS.md` instead.
 
 Inside the sandbox, the agent (or you) can always check what's allowed:
 

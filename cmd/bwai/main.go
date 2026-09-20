@@ -131,6 +131,11 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
+		if err := installOpencodeConfig(broker.TmpDir()); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai: install opencode config: %v\n", err)
+			_ = broker.Close()
+			return 1
+		}
 		go broker.Serve()
 		defer broker.Close()
 	}
@@ -214,6 +219,8 @@ func runSandbox() int {
 			"--ro-bind", helper, "/run/bwai/bin/git-safe",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bwai.ts"), "/run/bwai/bwai.ts",
+			"--ro-bind", filepath.Join(broker.TmpDir(), "opencode.json"), "/run/bwai/opencode.json",
+			"--setenv", "OPENCODE_CONFIG", "/run/bwai/opencode.json",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
 			// Prepend rather than append: these two are the sandbox's own
 			// helpers, and they must win over anything the host PATH
@@ -406,6 +413,24 @@ export default function (cmd: ModApi): void {
 // It's bind-mounted into the sandbox at /run/bwai/bwai.ts.
 func installBwaiMod(tmpDir string) error {
 	return os.WriteFile(filepath.Join(tmpDir, "bwai.ts"), []byte(bwaiModContent), 0o644)
+}
+
+// The config fragment passed to opencode via OPENCODE_CONFIG. The
+// instructions field points at the read-only /run/bwai mount, keeping
+// CLAUDE.md the single source of truth shared with Claude Code and
+// command-code.
+const opencodeConfigContent = `{
+	"$schema": "https://opencode.ai/config.json",
+	"instructions": ["/run/bwai/CLAUDE.md"]
+}
+`
+
+// installOpencodeConfig writes the OPENCODE_CONFIG fragment into the
+// broker tmpdir. bwai sets OPENCODE_CONFIG inside the sandbox, so
+// opencode picks up the bwai context at startup without any flag, and
+// without bwai writing to the agent's own config.
+func installOpencodeConfig(tmpDir string) error {
+	return os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(opencodeConfigContent), 0o644)
 }
 
 // installBwaiOutsideHelper places a copy of the running bwai binary

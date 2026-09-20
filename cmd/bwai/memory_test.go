@@ -55,6 +55,25 @@ func TestInstallAgentMemoryFileNoRules(t *testing.T) {
 	}
 }
 
+func TestInstallOpencodeConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := installOpencodeConfig(tmpDir); err != nil {
+		t.Fatalf("installOpencodeConfig: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(tmpDir, "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	// The fragment is passed to opencode via OPENCODE_CONFIG; its
+	// instructions must point at the shared read-only context mount.
+	for _, want := range []string{"/run/bwai/CLAUDE.md", "instructions"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("opencode.json missing %q:\n%s", want, s)
+		}
+	}
+}
+
 func TestInstallBwaiMod(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := installBwaiMod(tmpDir); err != nil {
