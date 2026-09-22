@@ -13,7 +13,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 		{Match: []string{"git-safe", "push"}, Action: ActionConfirm},
 		{Match: []string{"gh", "pr", "create", "**"}, Action: ActionConfirm},
 	}
-	if err := installAgentMemoryFile(tmpDir, rules); err != nil {
+	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees"); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -32,16 +32,37 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 	for _, want := range []string{
 		"Broker rules for this sandbox", "CONFIRM", "git-safe push", "gh pr create **",
 		"auto_allow", "closed wrapper",
+		// The worktree section must name the bound root, not the template.
+		"Git worktrees", "/home/u/proj/.proj.worktrees",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CLAUDE.md missing %q:\n%s", want, s)
 		}
 	}
+	if strings.Contains(s, "{{worktree_root}}") {
+		t.Errorf("CLAUDE.md still contains an unrendered placeholder:\n%s", s)
+	}
+}
+
+// Without a bound worktree root there is nothing to name; the section must
+// be absent rather than advertising a path that does not exist.
+func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := installAgentMemoryFile(tmpDir, nil, ""); err != nil {
+		t.Fatalf("installAgentMemoryFile: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "Git worktrees") {
+		t.Errorf("worktree section should be omitted without a root:\n%s", got)
+	}
 }
 
 func TestInstallAgentMemoryFileNoRules(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, ""); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))

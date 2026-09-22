@@ -113,6 +113,16 @@ func runSandbox() int {
 	// Append any trailing args after -- to the resolved command
 	command = append(command, flag.Args()...)
 
+	// Worktrees created with `wt` default to a sibling of the repo, which
+	// would land on the sandbox's tmpfs home and vanish with the session.
+	// Bind a dedicated host root and point worktrunk at it below. Computed
+	// before the broker so the agent memory below can name the path.
+	worktreeMounts, worktreeRoot, err := worktreeRootMounts(currentDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "bwai: warning: could not prepare worktree root: %v\n", err)
+		worktreeMounts, worktreeRoot = nil, ""
+	}
+
 	// Optionally start the host-execution broker. The broker exposes
 	// two sockets in /tmp/bwai-$PID/; broker.sock gets bind-mounted
 	// into the sandbox below.
@@ -128,7 +138,7 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
-		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules); err != nil {
+		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: install agent memory: %v\n", err)
 			_ = broker.Close()
 			return 1
@@ -154,6 +164,9 @@ func runSandbox() int {
 	fmt.Printf("bwai: sandboxed in %s\n", currentDir)
 	if len(gitMounts) > 0 {
 		fmt.Println("bwai: detected a git worktree — exposing its git dir so history and commits work.")
+	}
+	if worktreeRoot != "" {
+		fmt.Printf("bwai: git worktrees persist on the host at %s\n", worktreeRoot)
 	}
 	if broker != nil {
 		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
@@ -206,6 +219,13 @@ func runSandbox() int {
 	// home --tmpfs so bwrap creates the mountpoint inside the tmpfs, the
 	// same ordering homeMounts relies on for dotfiles.
 	args = append(args, gitMounts...)
+	args = append(args, worktreeMounts...)
+	if worktreeRoot != "" {
+		// worktrunk reads the full worktree path from this template and
+		// overrides ~/.config/worktrunk/config.toml, which is read-only here.
+		args = append(args, "--setenv", "WORKTRUNK_WORKTREE_PATH",
+			filepath.Join(worktreeRoot, "{{ branch | sanitize }}"))
+	}
 	if broker != nil {
 		// Bind broker.sock to /run/bwai/broker.sock and the helper
 		// binary under /run/bwai/bin. approve.sock is *not*
@@ -374,6 +394,36 @@ no wrapper can express; before you write one, ask what wrapper would make
 it unnecessary.
 `
 
+// worktreeSectionTemplate is the ## Git worktrees section, rendered only
+// when bwai bound a persistent worktree root. {{worktree_root}} is
+// substituted with that host path.
+const worktreeSectionTemplate = `
+## Git worktrees
+
+The only directory outside the project tree you can write to is
+` + "`{{worktree_root}}`" + `. It is bind-mounted from the host, so anything
+created there survives the sandbox; everything else outside the project
+tree lives on tmpfs and is gone when the session ends.
+
+Create worktrees there — with ` + "`wt`" + ` (which bwai already points at this
+directory through ` + "`WORKTRUNK_WORKTREE_PATH`" + `), or with plain git:
+
+` + "```sh" + `
+git worktree add {{worktree_root}}/mytask -b mytask
+wt switch --create mytask        # lands in the same directory
+` + "```" + `
+
+A bare ` + "`git worktree add ../foo`" + ` does *not* follow that setting: ` + "`../foo`" + `
+is a sibling of the project on tmpfs, so the worktree vanishes with the
+sandbox and the registration left in ` + "`.git/worktrees`" + ` goes stale. Give
+the destination under ` + "`{{worktree_root}}`" + ` explicitly.
+`
+
+// renderWorktreeSection fills the worktree section with the bound root.
+func renderWorktreeSection(root string) string {
+	return strings.ReplaceAll(worktreeSectionTemplate, "{{worktree_root}}", root)
+}
+
 // installAgentMemoryFile writes the CLAUDE.md fragment into the broker
 // tmpdir. It's bind-mounted into the sandbox at /run/bwai/CLAUDE.md,
 // where Claude Code picks it up via `--add-dir /run/bwai`, and where the
@@ -385,9 +435,17 @@ it unnecessary.
 // `bwai-outside -h` (which the prose below already suggests, and which
 // models routinely skip). printRules is shared with `--list-rules`, so
 // the injected view and the on-demand view cannot drift apart.
-func installAgentMemoryFile(tmpDir string, rules []Rule) error {
+//
+// worktreeRoot, when non-empty, names the one bind-mounted host directory
+// where a worktree persists; it is rendered into the fragment so agents
+// don't create one on the ephemeral overlay and lose it. Empty means the
+// currentDir is not a main checkout, so there is nothing to name.
+func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot string) error {
 	var b strings.Builder
 	b.WriteString(agentMemoryFileContent)
+	if worktreeRoot != "" {
+		b.WriteString(renderWorktreeSection(worktreeRoot))
+	}
 	b.WriteString("\n## Broker rules for this sandbox\n\n")
 	b.WriteString("This is exactly what the broker will run, and what it will ask a\n")
 	b.WriteString("human to approve. A command matching no rule is denied, so check\n")

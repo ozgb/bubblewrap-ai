@@ -155,6 +155,34 @@ func isWithin(parent, child string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != "..")
 }
 
+// worktreeRootMounts exposes a host directory for worktrees created inside
+// the sandbox. A main checkout gets one dedicated sibling root; worktrunk's
+// default sibling layout would otherwise land on the sandbox's tmpfs home
+// and vanish with the session. Pointing WORKTRUNK_WORKTREE_PATH at the bound
+// root (done by the caller) makes those worktrees persist.
+//
+// Only the dedicated root is exposed, not the repo's parent, so sibling
+// checkouts stay hidden. Linked worktrees (.git is a file) are covered by
+// gitWorktreeMounts instead, and non-git dirs get nothing.
+//
+// Returns the bind args and the host root, or nil/"" when currentDir is not
+// a main git checkout.
+func worktreeRootMounts(currentDir string) ([]string, string, error) {
+	dotGit := filepath.Join(currentDir, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil || !info.IsDir() {
+		return nil, "", nil
+	}
+	if _, err := os.Stat(filepath.Join(dotGit, "HEAD")); err != nil {
+		return nil, "", nil
+	}
+	root := filepath.Join(filepath.Dir(currentDir), "."+filepath.Base(currentDir)+".worktrees")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, "", err
+	}
+	return rwBind(root), root, nil
+}
+
 // gitWorktreeMounts exposes the shared git dir for a linked worktree so git
 // can resolve its real repo from inside the sandbox. When currentDir is an
 // ordinary checkout (.git is a directory) or not a git repo at all, it

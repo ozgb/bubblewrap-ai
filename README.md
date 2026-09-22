@@ -192,6 +192,8 @@ A `.bwai.json` in the directory you run `bwai` from is layered on top of the bas
 
 Linked git worktrees (created by `worktrunk` or `git worktree add`) keep their real git dir inside the main repo, which the home sandbox hides. `bwai` detects this automatically — no config needed — and bind-mounts the shared git dir read-write at its real host path, so history, `git status`, commits, and branch ops all work inside the sandbox just like in an ordinary checkout. Only the git dir is exposed, not the rest of the main repo's working tree.
 
+Creating a worktree *from inside* the sandbox is also covered. `worktrunk` defaults to a sibling of the repo, which without help would land on the sandbox's tmpfs home and vanish when the session ends. `bwai` pre-binds one dedicated host directory — `<parent>/.<repo>.worktrees` — and points `WORKTRUNK_WORKTREE_PATH` at it, so `wt` worktrees persist on the host. Only that root is exposed, not the repo's parent, so sibling checkouts stay hidden. Plain `git worktree add ../foo` does not follow the worktrunk setting and still lands on tmpfs.
+
 ## Host-execution broker (experimental)
 
 Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — `git commit -S` needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`. The broker lets specific argv lists escape to the host with per-command rules.

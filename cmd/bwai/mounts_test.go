@@ -264,6 +264,72 @@ func TestIsWithin(t *testing.T) {
 	}
 }
 
+func TestWorktreeRootMounts(t *testing.T) {
+	t.Run("main checkout gets a dedicated sibling root", func(t *testing.T) {
+		base := t.TempDir()
+		repo := filepath.Join(base, "myrepo")
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(repo, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		args, root, err := worktreeRootMounts(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(base, ".myrepo.worktrees")
+		if root != want {
+			t.Errorf("root = %q, want %q", root, want)
+		}
+		if !containsSequence(args, "--bind", want, want) {
+			t.Errorf("expected --bind of worktree root %q; args: %v", want, args)
+		}
+		if info, err := os.Stat(want); err != nil || !info.IsDir() {
+			t.Errorf("worktree root not created on disk: err=%v", err)
+		}
+	})
+
+	t.Run("non-git dir yields nothing", func(t *testing.T) {
+		args, root, err := worktreeRootMounts(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args != nil || root != "" {
+			t.Errorf("expected no mounts, got args=%v root=%q", args, root)
+		}
+	})
+
+	t.Run("linked worktree yields nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /somewhere\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		args, root, err := worktreeRootMounts(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args != nil || root != "" {
+			t.Errorf("expected no mounts, got args=%v root=%q", args, root)
+		}
+	})
+
+	t.Run(".git without HEAD is not a repo", func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "notrepo")
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		args, root, err := worktreeRootMounts(repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args != nil || root != "" {
+			t.Errorf("expected no mounts, got args=%v root=%q", args, root)
+		}
+	})
+}
+
 func TestGitWorktreeMounts(t *testing.T) {
 	t.Run("ordinary checkout returns nil", func(t *testing.T) {
 		dir := t.TempDir()
