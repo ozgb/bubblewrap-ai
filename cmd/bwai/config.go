@@ -140,29 +140,97 @@ func defaultConfig() Config {
 	}
 }
 
-// loadConfig reads the config file at the given path if it exists and returns the resulting Config.
-// Fields omitted from the file fall back to the defaults.
-func loadConfig(path string) (cfg Config, err error) {
-	cfg = defaultConfig()
-	var f *os.File
-	f, err = os.Open(path)
+// loadConfig reads the global config at path if it exists and returns it on
+// top of the defaults. Fields omitted from the file fall back to the defaults.
+func loadConfig(path string) (Config, error) {
+	cfg := defaultConfig()
+	if _, err := applyConfigFile(&cfg, path, false); err != nil {
+		return cfg, err
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// loadLayeredConfig loads the base config at basePath (the global
+// ~/.bwai.json, or --config), then layers the project-local config at
+// localPath on top. Set-like list fields — home_allow, home_block and
+// env_allow — are appended to the base, so a project only names what it
+// adds. Everything else, including the argv lists command and
+// bwrap_extra_args, overrides. An empty localPath skips the second layer.
+// Missing files are not an error.
+func loadLayeredConfig(basePath, localPath string) (Config, error) {
+	cfg := defaultConfig()
+	if _, err := applyConfigFile(&cfg, basePath, false); err != nil {
+		return cfg, err
+	}
+	if localPath != "" {
+		if _, err := applyConfigFile(&cfg, localPath, true); err != nil {
+			return cfg, err
+		}
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// applyConfigFile decodes the JSON file at path onto cfg and reports whether
+// the file existed. Decoding onto the existing value (rather than a fresh
+// struct) is deliberate: omitted nested fields such as broker.web.addr keep
+// their defaults. When merge is true, set-like list fields present in the
+// file are appended to cfg's instead of replacing them; argv lists such as
+// bwrap_extra_args are left to replace, because appending them would reorder
+// or duplicate flags.
+func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
+	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return cfg, nil
+		return false, nil
 	}
 	if err != nil {
-		return cfg, err
+		return false, err
 	}
-	defer func() {
-		if cerr := f.Close(); cerr != nil && err == nil {
-			err = cerr
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return false, fmt.Errorf("%s: %w", path, err)
+	}
+	// Snapshot the base lists before decoding: json.Unmarshal reuses a
+	// slice's backing array, so appending afterwards would otherwise see the
+	// local values already in place.
+	var prevAllow, prevBlock, prevEnv []string
+	if merge {
+		prevAllow = append([]string(nil), cfg.HomeAllow...)
+		prevBlock = append([]string(nil), cfg.HomeBlock...)
+		prevEnv = append([]string(nil), cfg.EnvAllow...)
+	}
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return false, fmt.Errorf("%s: %w", path, err)
+	}
+	if merge {
+		if _, ok := keys["home_allow"]; ok {
+			cfg.HomeAllow = appendStrings(prevAllow, cfg.HomeAllow)
 		}
-	}()
-	if err = json.NewDecoder(f).Decode(&cfg); err != nil {
-		return cfg, err
+		if _, ok := keys["home_block"]; ok {
+			cfg.HomeBlock = appendStrings(prevBlock, cfg.HomeBlock)
+		}
+		if _, ok := keys["env_allow"]; ok {
+			cfg.EnvAllow = appendStrings(prevEnv, cfg.EnvAllow)
+		}
 	}
+	return true, nil
+}
+
+func appendStrings(base, add []string) []string {
+	out := make([]string, 0, len(base)+len(add))
+	out = append(out, base...)
+	return append(out, add...)
+}
+
+func validateConfig(cfg *Config) error {
 	for i, r := range cfg.Broker.Rules {
-		if rerr := validateRule(r); rerr != nil {
-			return cfg, fmt.Errorf("broker.rules[%d]: %w", i, rerr)
+		if err := validateRule(r); err != nil {
+			return fmt.Errorf("broker.rules[%d]: %w", i, err)
 		}
 	}
 	// The web approval page is reachable from the sandbox (it shares the
@@ -173,11 +241,11 @@ func loadConfig(path string) (cfg Config, err error) {
 		if cfg.Broker.Web.Addr == "" {
 			cfg.Broker.Web.Addr = defaultWebAddr
 		}
-		if verr := validateWebAddr(cfg.Broker.Web.Addr); verr != nil {
-			return cfg, fmt.Errorf("broker.web.addr: %w", verr)
+		if err := validateWebAddr(cfg.Broker.Web.Addr); err != nil {
+			return fmt.Errorf("broker.web.addr: %w", err)
 		}
 	}
-	return cfg, nil
+	return nil
 }
 
 // validateWebAddr rejects any bind address that does not resolve to a

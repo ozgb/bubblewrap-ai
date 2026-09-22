@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -82,6 +83,87 @@ func TestLoadConfigRejectsNonLoopbackWebAddr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "loopback") {
 		t.Errorf("error = %v, want it to mention loopback", err)
+	}
+}
+
+// TestLoadLayeredConfigMergesLists pins the project-local contract: set-like
+// list fields (home_allow, env_allow, …) in the local file are appended to
+// the base rather than replacing it, so a project only names what it adds.
+// argv lists such as bwrap_extra_args and command override, because
+// appending them would reorder or duplicate flags. Nested defaults are
+// preserved when local omits them.
+func TestLoadLayeredConfigMergesLists(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	local := filepath.Join(dir, "local.json")
+	writeFile(t, base, `{"home_allow":["a"],"env_allow":["FOO"],"command":["bash"],"bwrap_extra_args":["--unshare-net"],"broker":{"approval_timeout_s":42}}`)
+	writeFile(t, local, `{"home_allow":["b"],"env_allow":["BAR"],"command":["zsh"],"bwrap_extra_args":["--unshare-ipc"]}`)
+
+	cfg, err := loadLayeredConfig(base, local)
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	if want := []string{"a", "b"}; !reflect.DeepEqual(cfg.HomeAllow, want) {
+		t.Errorf("home_allow = %v, want %v", cfg.HomeAllow, want)
+	}
+	if want := []string{"FOO", "BAR"}; !reflect.DeepEqual(cfg.EnvAllow, want) {
+		t.Errorf("env_allow = %v, want %v", cfg.EnvAllow, want)
+	}
+	if want := []string{"zsh"}; !reflect.DeepEqual(cfg.Command, want) {
+		t.Errorf("command = %v, want %v (local overrides)", cfg.Command, want)
+	}
+	if want := []string{"--unshare-ipc"}; !reflect.DeepEqual(cfg.BwrapExtraArgs, want) {
+		t.Errorf("bwrap_extra_args = %v, want %v (argv list must replace, not append)", cfg.BwrapExtraArgs, want)
+	}
+	if cfg.Broker.ApprovalTimeoutS != 42 {
+		t.Errorf("broker.approval_timeout_s = %d, want 42 (local omits broker)", cfg.Broker.ApprovalTimeoutS)
+	}
+}
+
+// TestLoadLayeredConfigAbsentLocal pins that a missing local file leaves the
+// base untouched, and that omitting a list locally does not duplicate it.
+func TestLoadLayeredConfigAbsentLocal(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	writeFile(t, base, `{"home_allow":["a"]}`)
+
+	cfg, err := loadLayeredConfig(base, filepath.Join(dir, "missing.json"))
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	if want := []string{"a"}; !reflect.DeepEqual(cfg.HomeAllow, want) {
+		t.Errorf("home_allow = %v, want %v", cfg.HomeAllow, want)
+	}
+
+	local := filepath.Join(dir, "local.json")
+	writeFile(t, local, `{"command":["zsh"]}`)
+	cfg, err = loadLayeredConfig(base, local)
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	if want := []string{"a"}; !reflect.DeepEqual(cfg.HomeAllow, want) {
+		t.Errorf("home_allow = %v, want %v (omitted list must not duplicate)", cfg.HomeAllow, want)
+	}
+}
+
+// TestLoadLayeredConfigValidatesLocal pins that validation runs over the
+// merged result, not just the base file.
+func TestLoadLayeredConfigValidatesLocal(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	local := filepath.Join(dir, "local.json")
+	writeFile(t, base, `{}`)
+	writeFile(t, local, `{"broker":{"enabled":true,"prompt":["web"],"web":{"addr":"0.0.0.0:9000"}}}`)
+
+	if _, err := loadLayeredConfig(base, local); err == nil {
+		t.Fatal("loadLayeredConfig accepted a non-loopback web.addr from the local config")
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

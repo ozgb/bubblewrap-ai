@@ -62,9 +62,16 @@ func runBrokerCheck(args []string) int {
 		}
 		configPath = filepath.Join(home, ".bwai.json")
 	}
-	cfg, err := loadConfig(configPath)
+	localPath := ""
+	if cwd, err := os.Getwd(); err == nil {
+		localPath = filepath.Join(cwd, ".bwai.json")
+		if localPath == configPath {
+			localPath = ""
+		}
+	}
+	cfg, err := loadLayeredConfig(configPath, localPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai broker check: load %s: %v\n", configPath, err)
+		fmt.Fprintf(os.Stderr, "bwai broker check: load config: %v\n", err)
 		return 2
 	}
 

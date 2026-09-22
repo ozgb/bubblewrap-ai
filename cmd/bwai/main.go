@@ -92,9 +92,16 @@ func runSandbox() int {
 	if *configFlag != "" {
 		configPath = *configFlag
 	}
-	cfg, err := loadConfig(configPath)
+	// A .bwai.json in the sandbox root layers on top of the global config:
+	// its list fields are appended, everything else overrides. Skip it if
+	// it is the base itself (e.g. running from $HOME).
+	localPath := filepath.Join(currentDir, ".bwai.json")
+	if localPath == configPath {
+		localPath = ""
+	}
+	cfg, err := loadLayeredConfig(configPath, localPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai: warning: could not load %s: %v\n", configPath, err)
+		fmt.Fprintf(os.Stderr, "bwai: warning: could not load config: %v\n", err)
 	}
 	homeAllow = cfg.HomeAllow
 	homeBlock = cfg.HomeBlock

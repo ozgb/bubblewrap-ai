@@ -178,6 +178,16 @@ Example `~/.bwai.json`:
 
 `home_allow` takes precedence over `home_block`.
 
+### Project-local config
+
+A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.bwai.json`, or `--config` if given). Its **set-like list fields** — `home_allow`, `home_block`, and `env_allow` — are *appended* to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
+
+```json
+{
+  "home_allow": [".rwe"]
+}
+```
+
 ### Git worktrees
 
 Linked git worktrees (created by `worktrunk` or `git worktree add`) keep their real git dir inside the main repo, which the home sandbox hides. `bwai` detects this automatically — no config needed — and bind-mounts the shared git dir read-write at its real host path, so history, `git status`, commits, and branch ops all work inside the sandbox just like in an ordinary checkout. Only the git dir is exposed, not the rest of the main repo's working tree.
