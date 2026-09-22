@@ -347,12 +347,24 @@ there is nothing to wait for. ` + "`CONFIRM`" + ` commands pause until the human
 approves them via ` + "`bwai approve`" + ` on the host. Output from approved
 commands streams back as it would from a normal shell.
 
-Rule-set convention: ` + "`auto_allow`" + ` is preferred over ` + "`CONFIRM`" + ` for
-commands whose safety is guaranteed in code by a closed wrapper — the
-` + "`git-safe`" + ` rules are the example. A wrapper that enforces its own
-policy has already made the judgement a human would have made, so the
-prompt adds nothing and only trains the habit of approving without
-reading.
+**Hunt for an ` + "`AUTO_ALLOW`" + ` rule; never settle for ` + "`CONFIRM`" + `
+while one exists.** A confirm stalls the whole session on a human who may
+be asleep, so treat every approval prompt as a failure to find the rule
+that already covers the job. Scan the rule list for the wrapper or the
+narrower argv that is already auto-allowed — ` + "`git-safe push`" + ` over a
+confirmed raw ` + "`git push`" + `, ` + "`git-safe commit`" + ` over
+` + "`bwai-outside git commit -S`" + `. Taking the first rule that happens to
+match, when an auto-allowed one sits a line below it, is laziness that
+spends a human's attention on nothing.
+
+The same convention governs writing rules: a command whose safety is
+guaranteed in code by a closed wrapper gets ` + "`auto_allow`" + `, never
+` + "`confirm`" + `. The wrapper has already made the judgement a human would
+have made, so the prompt adds nothing — and an approval that is always
+granted is worse than none, because it trains the habit of approving
+without reading. ` + "`confirm`" + ` is the last resort, reserved for a check
+no wrapper can express; before you write one, ask what wrapper would make
+it unnecessary.
 `
 
 // installAgentMemoryFile writes the CLAUDE.md fragment into the broker

@@ -383,14 +383,24 @@ Because the message is an argument, this rule carries a trailing `**`
 where `push` does not. That is the one loose spot in the pattern, and the
 wrapper is what keeps it meaningful: the tail can only ever be `-m` pairs.
 
-The rules above are `auto_allow` for a reason. `confirm` is what you reach
-for when a pattern cannot express the check that matters — the human stands
-in for the missing judgement. Once that judgement lives in the wrapper, the
-prompt adds no information: an approver looking at `git-safe push` learns
-only what the rule already told them. And approval that is always granted is
-worse than no approval, because it trains the habit of approving without
-reading. The wrapper earns the stronger action by making the decision the
-human would otherwise have made.
+The rules above are `auto_allow`, and that is the point of the exercise.
+`confirm` is a last resort, not a safe default: it is what you reach for
+only when a pattern cannot express the check that matters and a human has
+to stand in for the missing judgement. Once that judgement lives in the
+wrapper, the prompt adds no information — an approver looking at `git-safe
+push` learns only what the rule already told them — and approval that is
+always granted is worse than no approval, because it trains the habit of
+approving without reading. So a `confirm` rule is a standing bug report on
+the rule set: it says nobody has written the wrapper yet. Before adding
+one, ask what closed wrapper would let it be `auto_allow` instead; the
+wrapper earns the stronger action by making the decision the human would
+otherwise have made.
+
+The same applies to the agent at runtime, which is why the injected
+context tells it to hunt the rule list for an `AUTO_ALLOW` path before
+issuing anything that lands on a `confirm`. An unattended session that
+stalls on an approval nobody is awake to give has failed, and it usually
+failed one line above the rule it matched.
 
 **Keep the wrapper closed.** The guarantee holds only while `git-safe`
 refuses to forward arbitrary arguments to `git`. If it ever grows a

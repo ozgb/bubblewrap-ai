@@ -292,6 +292,8 @@ That reduces the broker rules to:
 
 Note the action: **`auto_allow`, not `confirm`.** That is the payoff of moving the policy into the wrapper. A rule over raw `git push` needs a human because the pattern cannot express the check that matters; `git-safe` carries the check itself, so the ancestry decision is already made in code before git runs. A prompt would add nothing — an approver reading `git-safe push` learns only what the rule already told them — and an approval that is always granted is worse than none, because it trains the habit of approving without reading.
 
+Treat `confirm` as the last resort rather than the cautious default. Every confirm rule stalls an unattended session on a human who may be asleep, so each one is a standing bug report on the rule set: it marks a judgement nobody has moved into code yet. Write the wrapper, then write `auto_allow`. The agent is told the same thing in its injected context — hunt the rule list for an `AUTO_ALLOW` path before issuing a command that lands on a `confirm`.
+
 `commit` needs a trailing `**` because the message is an argument — unlike `push`, it can't be a two-token rule — but the wrapper is what makes the tail safe: it accepts only `-m` pairs, so the pattern never has to enumerate the bad flags.
 
 ### Telling the agent it can call `bwai-outside`
