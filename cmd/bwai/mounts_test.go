@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -262,6 +263,60 @@ func TestIsWithin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolvSymlinkMount(t *testing.T) {
+	t.Run("binds a symlink under the host root", func(t *testing.T) {
+		base := t.TempDir()
+		hostRoot := filepath.Join(base, "run/host")
+		dir := filepath.Join(hostRoot, "etc")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		conf := filepath.Join(dir, "resolv.conf")
+		if err := os.WriteFile(conf, []byte("nameserver 127.0.0.53\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		etcResolv := filepath.Join(t.TempDir(), "resolv.conf")
+		if err := os.Symlink(conf, etcResolv); err != nil {
+			t.Fatal(err)
+		}
+		want := roBind(conf, conf)
+		if got := resolvSymlinkMount(etcResolv, hostRoot); !slices.Equal(got, want) {
+			t.Errorf("resolvSymlinkMount = %v, want %v", got, want)
+		}
+	})
+	t.Run("skips a symlink outside the host root", func(t *testing.T) {
+		other := filepath.Join(t.TempDir(), "real.conf")
+		if err := os.WriteFile(other, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		etcResolv := filepath.Join(t.TempDir(), "resolv.conf")
+		if err := os.Symlink(other, etcResolv); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvSymlinkMount(etcResolv, filepath.Join(t.TempDir(), "run/host")); got != nil {
+			t.Errorf("resolvSymlinkMount = %v, want nil", got)
+		}
+	})
+	t.Run("skips a real file", func(t *testing.T) {
+		etcResolv := filepath.Join(t.TempDir(), "resolv.conf")
+		if err := os.WriteFile(etcResolv, []byte("nameserver 127.0.0.53\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvSymlinkMount(etcResolv, filepath.Join(t.TempDir(), "run/host")); got != nil {
+			t.Errorf("resolvSymlinkMount = %v, want nil", got)
+		}
+	})
+	t.Run("skips a dangling symlink", func(t *testing.T) {
+		etcResolv := filepath.Join(t.TempDir(), "resolv.conf")
+		if err := os.Symlink(filepath.Join(t.TempDir(), "missing.conf"), etcResolv); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvSymlinkMount(etcResolv, filepath.Join(t.TempDir(), "run/host")); got != nil {
+			t.Errorf("resolvSymlinkMount = %v, want nil", got)
+		}
+	})
 }
 
 func TestWorktreeRootMounts(t *testing.T) {

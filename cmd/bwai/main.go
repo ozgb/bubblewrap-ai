@@ -128,7 +128,7 @@ func runSandbox() int {
 	// into the sandbox below.
 	var broker *Broker
 	if cfg.Broker.Enabled {
-		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(home))
+		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(home), worktreeRoot)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: broker init failed: %v\n", err)
 			return 1
@@ -205,6 +205,7 @@ func runSandbox() int {
 		"--tmpfs", "/run",
 	)
 	args = append(args, dnsMounts()...)
+	args = append(args, etcResolvMount()...)
 	// Home directory
 	args = append(args, tmpfs(home)...)
 	args = append(args, homeMounts(home)...)

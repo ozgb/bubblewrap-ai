@@ -63,7 +63,7 @@ func TestHostArgv(t *testing.T) {
 // We override the on-disk layout by setting the broker's tmp dir to a
 // per-test path; the production path uses /tmp/bwai-$PID, but tests need
 // isolation.
-func newTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
+func newTestBroker(t *testing.T, cfg BrokerConfig, projectDir string, extraRoots ...string) *Broker {
 	t.Helper()
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, "bin"), 0o700); err != nil {
@@ -94,6 +94,7 @@ func newTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
 	b := &Broker{
 		cfg:        cfg,
 		projectDir: projectDir,
+		extraRoots: extraRoots,
 		auditLog:   audit,
 		brokerLn:   brokerLn,
 		approveLn:  approveLn,
@@ -108,9 +109,9 @@ func newTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
 }
 
 // startTestBroker builds a broker and starts its accept loops.
-func startTestBroker(t *testing.T, cfg BrokerConfig, projectDir string) *Broker {
+func startTestBroker(t *testing.T, cfg BrokerConfig, projectDir string, extraRoots ...string) *Broker {
 	t.Helper()
-	b := newTestBroker(t, cfg, projectDir)
+	b := newTestBroker(t, cfg, projectDir, extraRoots...)
 	go b.Serve()
 	return b
 }
@@ -213,6 +214,33 @@ func TestBroker_RejectsCwdOutsideProject(t *testing.T) {
 	})
 	if len(frames) != 1 || frames[0].Type != frameTypeDenied || frames[0].Reason != denyReasonInvalid {
 		t.Fatalf("expected deny:invalid for out-of-project cwd, got %+v", frames)
+	}
+}
+
+func TestBroker_CwdInWorktreeRootAllowed(t *testing.T) {
+	projectDir := t.TempDir()
+	worktreeRoot := filepath.Join(filepath.Dir(projectDir), ".proj.worktrees")
+	if err := os.MkdirAll(filepath.Join(worktreeRoot, "wt"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules:   []Rule{{Match: []string{"echo", "x"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir, worktreeRoot)
+	frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"echo", "x"}, Cwd: filepath.Join(worktreeRoot, "wt"),
+	})
+	if len(frames) < 2 || frames[len(frames)-1].Type != frameTypeExit {
+		t.Fatalf("expected exec to succeed from worktree cwd, got %+v", frames)
+	}
+
+	// A sibling directory that is not a registered root stays denied.
+	frames = sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"echo", "x"}, Cwd: filepath.Join(filepath.Dir(projectDir), ".other.worktrees"),
+	})
+	if len(frames) != 1 || frames[0].Type != frameTypeDenied || frames[0].Reason != denyReasonInvalid {
+		t.Fatalf("expected deny:invalid for unregistered worktree root, got %+v", frames)
 	}
 }
 

@@ -84,6 +84,26 @@ func dnsMounts() []string {
 	return nil
 }
 
+// etcResolvMount follows the sandbox's /etc/resolv.conf symlink and binds
+// the host file at its real path so the link resolves inside the sandbox.
+// Without it the link dangles (its target lives under /run/host, which the
+// tmpfs /run overlay hides), so Go programs find no nameserver and every
+// DNS lookup fails while glibc programs still resolve through nss-resolve.
+func etcResolvMount() []string {
+	return resolvSymlinkMount("/etc/resolv.conf", "/run/host")
+}
+
+func resolvSymlinkMount(etcResolv, hostRoot string) []string {
+	dst, err := os.Readlink(etcResolv)
+	if err != nil || !filepath.IsAbs(dst) || !isWithin(hostRoot, dst) {
+		return nil
+	}
+	if _, err := os.Stat(dst); err != nil {
+		return nil
+	}
+	return roBind(dst, dst)
+}
+
 // Bind GPU device nodes into the sandbox if they exist on this host.
 // This includes the DRI subsystem and any NVIDIA character devices.
 func gpuMounts() []string {

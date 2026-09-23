@@ -98,6 +98,11 @@ func (p *pendingRequest) resolve(decision string) {
 type Broker struct {
 	cfg        BrokerConfig
 	projectDir string
+	// extraRoots are additional host directories whose sandbox paths are
+	// accepted as request cwd alongside projectDir. These are the bind
+	// worktree root and the revealed host paths; without them a request
+	// made from a worktree would be denied before rules are consulted.
+	extraRoots []string
 	auditLog   *auditLogger
 	brokerLn   net.Listener
 	approveLn  net.Listener
@@ -118,9 +123,11 @@ type Broker struct {
 	confirmHist []time.Time
 }
 
-// NewBroker prepares the tmpdir and listeners. The caller is
+// NewBroker prepares the tmpdir and listeners. extraRoots, when non-empty,
+// names additional host directories accepted as request cwd (the persistent
+// worktree root). The caller is
 // responsible for invoking Serve in a goroutine and Close on shutdown.
-func NewBroker(cfg BrokerConfig, projectDir string, auditPath string) (*Broker, error) {
+func NewBroker(cfg BrokerConfig, projectDir string, auditPath string, extraRoots ...string) (*Broker, error) {
 	tmpDir := fmt.Sprintf("/tmp/bwai-%d", os.Getpid())
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create tmpdir: %w", err)
@@ -171,6 +178,7 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string) (*Broker, 
 	b := &Broker{
 		cfg:        cfg,
 		projectDir: projectDir,
+		extraRoots: extraRoots,
 		auditLog:   audit,
 		brokerLn:   brokerLn,
 		approveLn:  approveLn,
@@ -563,15 +571,20 @@ func (b *Broker) cwdAllowed(cwd string) bool {
 	if !filepath.IsAbs(cwd) {
 		return false
 	}
-	clean := filepath.Clean(cwd)
-	rel, err := filepath.Rel(b.projectDir, clean)
-	if err != nil {
-		return false
+	roots := append([]string{b.projectDir}, b.extraRoots...)
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		rel, err := filepath.Rel(root, filepath.Clean(cwd))
+		if err != nil {
+			continue
+		}
+		if rel == "." || !strings.HasPrefix(rel, "..") {
+			return true
+		}
 	}
-	if rel == "." {
-		return true
-	}
-	return !strings.HasPrefix(rel, "..")
+	return false
 }
 
 // checkRateLimit enforces both the inter-confirm minimum interval and
