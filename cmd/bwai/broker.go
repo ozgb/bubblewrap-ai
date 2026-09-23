@@ -24,7 +24,7 @@ import (
 // Op means "exec" (the original behaviour).
 type brokerRequest struct {
 	V            int      `json:"v"`
-	Op           string   `json:"op,omitempty"` // "exec" (default) | "list_rules"
+	Op           string   `json:"op,omitempty"` // "exec" (default) | "list_rules" | "check"
 	Argv         []string `json:"argv"`
 	Cwd          string   `json:"cwd"`
 	StdinInherit bool     `json:"stdin_inherit"`
@@ -33,6 +33,7 @@ type brokerRequest struct {
 const (
 	opExec      = "exec"
 	opListRules = "list_rules"
+	opCheck     = "check"
 )
 
 // Wire protocol — host → sandbox reply frames. Pointer for Code so the
@@ -44,6 +45,11 @@ type brokerFrame struct {
 	Code   *int   `json:"code,omitempty"`
 	Reason string `json:"reason,omitempty"`
 	Rules  []Rule `json:"rules,omitempty"` // populated only for frameTypeRules
+	// Matched names the rule the matcher picked. Attached to pending and
+	// denied frames so the sandbox sees which rule fired without having
+	// to re-derive first-match precedence from the rule list, and is the
+	// whole payload of a frameTypeCheck dry run.
+	Matched *matchedRule `json:"matched,omitempty"`
 }
 
 const (
@@ -53,7 +59,19 @@ const (
 	frameTypeExit    = "exit"
 	frameTypeDenied  = "denied"
 	frameTypeRules   = "rules"
+	frameTypeCheck   = "check"
 )
+
+// matchedRule reports which rule the matcher selected for an argv.
+// Rule is nil when Idx is -1 (no rule matched — the implicit auto_deny).
+// Action is the *effective* action: the exec path promotes a confirm to
+// auto_allow for session-allowed argv, and the check dry run mirrors
+// that so its answer matches what a real exec would do.
+type matchedRule struct {
+	Idx    int    `json:"idx"`
+	Action string `json:"action"`
+	Rule   *Rule  `json:"rule,omitempty"`
+}
 
 const (
 	denyReasonRule      = "rule"
@@ -336,6 +354,9 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 	case opListRules:
 		_ = enc.Encode(brokerFrame{Type: frameTypeRules, Rules: b.cfg.Rules})
 		return
+	case opCheck:
+		b.handleCheck(enc, req)
+		return
 	default:
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
@@ -350,17 +371,13 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		return
 	}
 
-	action, idx := matchRules(b.cfg.Rules, req.Argv)
-	// "always-this-session" promotes a previously-confirmed argv to auto_allow
-	// for the lifetime of this broker.
-	if action == ActionConfirm && b.isSessionAllowed(req.Argv) {
-		action = ActionAutoAllow
-	}
+	verdict := b.matchVerdict(req.Argv)
+	action, idx := verdict.Action, verdict.Idx
 
 	switch action {
 	case ActionAutoDeny:
 		b.auditLog.write(auditEntry{Argv: req.Argv, Cwd: req.Cwd, MatchedRule: idx, Decision: "denied:" + denyReasonRule})
-		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonRule})
+		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonRule, Matched: verdict})
 		return
 	case ActionAutoAllow:
 		b.execAndStream(enc, req, idx, "auto_allow")
@@ -368,10 +385,10 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 	case ActionConfirm:
 		if !b.checkRateLimit() {
 			b.auditLog.write(auditEntry{Argv: req.Argv, Cwd: req.Cwd, MatchedRule: idx, Decision: "denied:" + denyReasonRateLimit})
-			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonRateLimit})
+			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonRateLimit, Matched: verdict})
 			return
 		}
-		decision := b.awaitApproval(req, idx, enc)
+		decision := b.awaitApproval(req, verdict, enc)
 		switch decision {
 		case "approve":
 			b.execAndStream(enc, req, idx, "confirm")
@@ -380,22 +397,55 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 			b.execAndStream(enc, req, idx, "confirm:always")
 		case "deny":
 			b.auditLog.write(auditEntry{Argv: req.Argv, Cwd: req.Cwd, MatchedRule: idx, Decision: "denied:" + denyReasonUser})
-			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonUser})
+			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonUser, Matched: verdict})
 		case "timeout":
 			b.auditLog.write(auditEntry{Argv: req.Argv, Cwd: req.Cwd, MatchedRule: idx, Decision: "denied:" + denyReasonTimeout})
-			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonTimeout})
+			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonTimeout, Matched: verdict})
 		}
 	}
 }
 
+// matchVerdict runs the matcher plus session promotion. Shared by the
+// exec and check paths so a dry run cannot drift from what would
+// actually execute.
+func (b *Broker) matchVerdict(argv []string) *matchedRule {
+	action, idx := matchRules(b.cfg.Rules, argv)
+	// "always-this-session" promotes a previously-confirmed argv to
+	// auto_allow for the lifetime of this broker.
+	if action == ActionConfirm && b.isSessionAllowed(argv) {
+		action = ActionAutoAllow
+	}
+	m := &matchedRule{Idx: idx, Action: action}
+	if idx >= 0 {
+		r := b.cfg.Rules[idx]
+		m.Rule = &r
+	}
+	return m
+}
+
+// handleCheck answers a dry-run "which rule would fire?" probe. Nothing
+// executes and cwd is not consulted — matching is a pure function of the
+// rule list and argv — so the sandbox may ask freely; the answer exposes
+// nothing the --list-rules op does not already hand out. Session
+// promotion is applied so the reported action is the one an exec would
+// take.
+func (b *Broker) handleCheck(enc *json.Encoder, req brokerRequest) {
+	if len(req.Argv) == 0 {
+		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
+		return
+	}
+	_ = enc.Encode(brokerFrame{Type: frameTypeCheck, Matched: b.matchVerdict(req.Argv)})
+}
+
 // awaitApproval enqueues req, sends the pending frame, and blocks until
-// the approver responds or the timeout fires.
-func (b *Broker) awaitApproval(req brokerRequest, matchIdx int, enc *json.Encoder) string {
+// the approver responds or the timeout fires. verdict is attached to the
+// pending frame so the waiting sandbox knows which rule prompted.
+func (b *Broker) awaitApproval(req brokerRequest, verdict *matchedRule, enc *json.Encoder) string {
 	p := &pendingRequest{
 		id:       newRequestID(),
 		token:    newToken(),
 		req:      req,
-		matchIdx: matchIdx,
+		matchIdx: verdict.Idx,
 		enqueued: time.Now(),
 		decision: make(chan string, 1),
 	}
@@ -417,7 +467,7 @@ func (b *Broker) awaitApproval(req brokerRequest, matchIdx int, enc *json.Encode
 		}
 	}()
 
-	if err := enc.Encode(brokerFrame{Type: frameTypePending, ID: p.id}); err != nil {
+	if err := enc.Encode(brokerFrame{Type: frameTypePending, ID: p.id, Matched: verdict}); err != nil {
 		return "deny"
 	}
 

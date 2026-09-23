@@ -78,16 +78,35 @@ func runBrokerCheck(args []string) int {
 	return printCheckResult(os.Stdout, cfg.Broker.Rules, argv)
 }
 
-// printCheckResult formats the matcher output. Kept separate from
-// runBrokerCheck so tests can exercise it without juggling stdio.
+// printCheckResult matches argv against rules locally and prints the
+// verdict. Used by the host-side `bwai broker check`; the sandbox-side
+// `bwai-outside --check` instead receives a verdict over the wire and
+// formats it with printCheckVerdict, so both surfaces print identically.
 func printCheckResult(w io.Writer, rules []Rule, argv []string) int {
 	action, idx := matchRules(rules, argv)
-	if idx < 0 {
+	var rule *Rule
+	if idx >= 0 {
+		rule = &rules[idx]
+	}
+	return printCheckVerdict(w, action, idx, rule)
+}
+
+// printCheckVerdict formats a match verdict. Kept separate from
+// printCheckResult so both the local matcher and the wire client can
+// exercise it without juggling stdio.
+//
+// Exit codes:
+//
+//	0 — rule matched and action is auto_allow or confirm
+//	1 — explicit auto_deny rule matched, or no rule matched (implicit deny)
+//	2 — unused here; reserved for usage / I/O errors in the callers
+func printCheckVerdict(w io.Writer, action string, idx int, rule *Rule) int {
+	if idx < 0 || rule == nil {
 		fmt.Fprintln(w, "matched: (none)")
 		fmt.Fprintln(w, "result:  AUTO_DENY (implicit)")
 		return 1
 	}
-	ruleJSON, err := json.Marshal(rules[idx])
+	ruleJSON, err := json.Marshal(rule)
 	if err != nil {
 		// Should not happen for an in-memory Rule but be defensive.
 		fmt.Fprintf(w, "matched: rules[%d]  (failed to marshal: %v)\n", idx, err)

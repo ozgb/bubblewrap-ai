@@ -316,6 +316,12 @@ func TestBroker_ConfirmApproved(t *testing.T) {
 				if fr.ID != approvedID {
 					t.Errorf("pending id %q want %q", fr.ID, approvedID)
 				}
+				// The pending frame must name the rule that prompted, so
+				// the sandbox can see why it is waiting.
+				if fr.Matched == nil || fr.Matched.Idx != 0 || fr.Matched.Rule == nil ||
+					fr.Matched.Action != ActionConfirm {
+					t.Errorf("pending frame matched = %+v, want rules[0] confirm", fr.Matched)
+				}
 			}
 		}
 		gotStdout, _, exitCode := collectStreams(t, res.frames)
@@ -375,6 +381,10 @@ func TestBroker_ConfirmDenied(t *testing.T) {
 		for _, fr := range frames {
 			if fr.Type == frameTypeDenied && fr.Reason == denyReasonUser {
 				sawDenied = true
+				// The denial must name the confirm rule that fired.
+				if fr.Matched == nil || fr.Matched.Idx != 0 || fr.Matched.Rule == nil {
+					t.Errorf("denied frame matched = %+v, want rules[0]", fr.Matched)
+				}
 			}
 		}
 		if !sawDenied {

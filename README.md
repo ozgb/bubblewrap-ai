@@ -348,8 +348,9 @@ Inside the sandbox, the agent (or you) can always check what's allowed:
 ```sh
 bwai-outside --help          # usage + rule list
 bwai-outside --list-rules    # just the rules, e.g. for piping to less
+bwai-outside --check gh pr view 123   # dry-run: which rule would fire?
 ```
 
-Output is grouped by `AUTO_ALLOW` / `CONFIRM` / `AUTO_DENY` so it's easy to scan — the agent uses the same view a human does.
+Rules print in config order, first-match wins, each row numbered `rules[N]` — the same index denials and `--check` cite, so "why was this denied?" is a one-line lookup instead of an exercise in re-deriving pattern precedence. Denied and pending messages name the rule that fired (`denied (rule) — rules[12] AUTO_DENY gh secret **`), and since patterns match argv token-by-token, the rule list footer spells out the classic trap: `gh issue -R org/repo create` does **not** match `gh issue create **` (its second token is `-R`, not `create`) — pass the flag to land on the narrow rule.
 
 See `docs/broker.md` for the full design.

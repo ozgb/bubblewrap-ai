@@ -366,9 +366,15 @@ that need a credential the sandbox deliberately hides.
   current rule list, including which commands are auto-allowed and
   which require human confirmation.
 - ` + "`bwai-outside --list-rules`" + ` — just the rules.
+- ` + "`bwai-outside --check <cmd> [args...]`" + ` — dry-run: prints which
+  rule would match the argv and what the broker would do, runs nothing.
 
-If a command is denied, it isn't on the allowlist. Check
-` + "`bwai-outside --list-rules`" + ` first rather than retrying.
+If a command is denied, the message names the rule that fired, e.g.
+"denied (rule) — rules[12] AUTO_DENY gh secret **" — read it before
+retrying a variant, since the fix is often a small change in argv, like
+moving a flag. Check ` + "`bwai-outside --list-rules`" + ` first rather than
+retrying blind; when unsure which rule a spelling would hit,
+` + "`bwai-outside --check`" + ` answers without running anything.
 
 Commands flagged ` + "`AUTO_ALLOW`" + ` need no approval — run them directly,
 there is nothing to wait for. ` + "`CONFIRM`" + ` commands pause until the human

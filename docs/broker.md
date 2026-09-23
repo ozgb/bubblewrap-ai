@@ -286,6 +286,33 @@ result:  AUTO_DENY
 Cheap to implement and the only reliable way to audit a non-trivial rule
 set without spelunking the JSON by hand.
 
+The same verdict is available from *inside* the sandbox, where the
+config file is not mounted, via a `check` op over broker.sock:
+
+```
+$ bwai-outside --check gh issue -R org/repo create "title"
+matched: rules[1]  { "match": ["gh","issue","-R","org/repo","create","**"], "action": "auto_allow" }
+result:  AUTO_ALLOW
+```
+
+`--check` executes nothing and consults no cwd — matching is a pure
+function of the rule list and argv — but it does apply the
+"always-this-session" promotion, so it answers what a real exec would
+do, not what the static config says. This is the agent's first stop
+when unsure which rule a spelling would hit: patterns match argv
+token-by-token, so a flag anywhere shifts every later token
+(`gh issue -R org/repo create` does **not** match
+`["gh","issue","create","**"]` — its second token is `-R`), and the
+agent should not have to re-derive first-match precedence by hand to
+discover that.
+
+For the same reason, pending and denied frames name the rule that fired
+(`matched: {idx, action, rule}` on the wire, rendered as
+`denied (rule) — rules[12] AUTO_DENY gh secret **` in the client), so a
+denial is self-explaining instead of a nudge to go read the list.
+`--list-rules` numbers each row with the same `rules[N]` index so the
+three views — list, denial, dry run — share one coordinate system.
+
 ## Security model
 
 - **Rules are the hard gate.** Approval is a second factor; you can
