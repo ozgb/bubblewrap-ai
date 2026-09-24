@@ -23,6 +23,7 @@ vendor/
 # Build output
 /bin/
 /dist/
+/bwai
 
 # IDE / editor
 .idea/
