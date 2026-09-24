@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -105,6 +106,17 @@ func runSandbox() int {
 	}
 	homeAllow = cfg.HomeAllow
 	homeBlock = cfg.HomeBlock
+
+	// Persistent state root: created on the host and bound read-write below
+	// so tool caches and installed binaries survive the session without
+	// exposing the host's own caches.
+	stateRoot := expandHome(cfg.StateRoot, home)
+	if stateRoot != "" {
+		if err := os.MkdirAll(filepath.Join(stateRoot, "bin"), 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "bwai: warning: state_root %s: %v\n", stateRoot, err)
+			stateRoot = ""
+		}
+	}
 
 	command := cfg.Command
 	if *commandFlag != "" {
@@ -215,6 +227,15 @@ func runSandbox() int {
 			args = append(args, "--setenv", key, val)
 		}
 	}
+	// The state-root bundle, then literal env_set. bwrap applies --setenv in
+	// order, so env_set overrides the bundle and bwrap_extra_args overrides
+	// both.
+	if stateRoot != "" {
+		args = append(args, stateRootEnvArgs(stateRoot)...)
+	}
+	for _, key := range sortedKeys(cfg.EnvSet) {
+		args = append(args, "--setenv", key, expandHome(cfg.EnvSet[key], home))
+	}
 	args = append(args,
 		// Read-only OS tree
 		"--ro-bind", "/usr", "/usr",
@@ -240,6 +261,11 @@ func runSandbox() int {
 	// Home directory
 	args = append(args, tmpfs(home)...)
 	args = append(args, homeMounts(home)...)
+	// Bind the state root after homeMounts, which would otherwise ro-bind a
+	// dotdir under $HOME before this re-binds it read-write.
+	if stateRoot != "" {
+		args = append(args, rwBind(stateRoot)...)
+	}
 	args = append(args,
 		// Current directory
 		"--bind", currentDir, currentDir,
@@ -281,12 +307,25 @@ func runSandbox() int {
 			"--ro-bind", filepath.Join(broker.TmpDir(), "opencode.json"), "/run/bwai/opencode.json",
 			"--setenv", "OPENCODE_CONFIG", "/run/bwai/opencode.json",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
-			// Prepend rather than append: these two are the sandbox's own
-			// helpers, and they must win over anything the host PATH
-			// happens to hold — a stale ~/.local/bin/git-safe from an
-			// older install would otherwise shadow the bind-mounted one.
-			"--setenv", "PATH", "/run/bwai/bin:"+os.Getenv("PATH"),
 		)
+	}
+	// PATH: user prepends, then the state root's bin, then the broker's
+	// helper dir — which must beat a stale host git-safe, so it precedes the
+	// host PATH. One --setenv keeps the parts from clobbering each other.
+	var prepend []string
+	for _, p := range cfg.PathPrepend {
+		if p = expandHome(p, home); p != "" {
+			prepend = append(prepend, p)
+		}
+	}
+	if stateRoot != "" {
+		prepend = append(prepend, filepath.Join(stateRoot, "bin"))
+	}
+	if broker != nil {
+		prepend = append(prepend, "/run/bwai/bin")
+	}
+	if len(prepend) > 0 {
+		args = append(args, "--setenv", "PATH", strings.Join(prepend, ":")+":"+os.Getenv("PATH"))
 	}
 	args = append(args, cfg.BwrapExtraArgs...)
 
@@ -313,6 +352,19 @@ func runSandbox() int {
 		command = []string{"bash", "-i", "-c", strings.Join(command, " ")}
 	}
 
+	// A home_block entry naming a file (e.g. .cargo/credentials.toml) can't
+	// be hidden with --tmpfs, so replace it with an empty --file. Each needs
+	// its own fd: bwrap consumes the one it is given and rejects reuse.
+	for _, p := range blockedSubPathFiles(home, homeBlock, homeAllow) {
+		maskR, maskW, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			continue
+		}
+		_ = maskW.Close()
+		extraFiles = append(extraFiles, maskR)
+		args = append(args, "--file", fmt.Sprintf("%d", 2+len(extraFiles)), p)
+	}
+
 	args = append(args, command...)
 
 	// Execute the bubblewrap command
@@ -330,6 +382,63 @@ func runSandbox() int {
 		return 1
 	}
 	return 0
+}
+
+// stateRootEnv points each tool's cache or config home at a subdirectory of
+// the configured state_root. "." means the root itself: cargo installs its
+// binaries into <root>/bin via CARGO_INSTALL_ROOT, matching the UV_*_BIN_DIR
+// entries.
+var stateRootEnv = map[string]string{
+	"XDG_CACHE_HOME":           "cache",
+	"npm_config_cache":         "cache/npm",
+	"YARN_CACHE_FOLDER":        "cache/yarn",
+	"PIP_CACHE_DIR":            "cache/pip",
+	"UV_CACHE_DIR":             "cache/uv",
+	"UV_PYTHON_INSTALL_DIR":    "uv/python",
+	"UV_PYTHON_BIN_DIR":        "bin",
+	"UV_TOOL_DIR":              "uv/tools",
+	"UV_TOOL_BIN_DIR":          "bin",
+	"CARGO_HOME":               "cargo",
+	"CARGO_INSTALL_ROOT":       ".",
+	"GOMODCACHE":               "go/pkg/mod",
+	"GOCACHE":                  "go/build",
+	"GOBIN":                    "bin",
+	"BUN_INSTALL_CACHE_DIR":    "cache/bun",
+	"PLAYWRIGHT_BROWSERS_PATH": "cache/ms-playwright",
+	"HF_HOME":                  "cache/huggingface",
+}
+
+// stateRootEnvArgs renders the bundle as bwrap --setenv args in a stable
+// order, since map iteration is not deterministic.
+func stateRootEnvArgs(root string) []string {
+	var args []string
+	for _, key := range sortedKeys(stateRootEnv) {
+		args = append(args, "--setenv", key, filepath.Join(root, stateRootEnv[key]))
+	}
+	return args
+}
+
+// expandHome expands a leading ~ (or a bare ~) against the sandbox home.
+// bwrap expands neither ~ nor $VAR in --setenv or bind paths, so bwai does
+// the ~ expansion itself.
+func expandHome(p, home string) string {
+	if p == "~" {
+		return home
+	}
+	if strings.HasPrefix(p, "~/") {
+		return filepath.Join(home, p[2:])
+	}
+	return p
+}
+
+// sortedKeys returns a map's keys sorted, so generated argv is stable.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // agentMemoryFileContent is the CLAUDE.md fragment that bwai writes

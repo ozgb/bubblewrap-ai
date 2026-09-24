@@ -68,6 +68,18 @@ func TestDefaultConfigIncludesGoBin(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigBlocksRegistryCredentials pins that package-manager
+// token files are hidden: they are the same class as ~/.ssh, and both npm
+// and cargo keep registry API tokens in them.
+func TestDefaultConfigBlocksRegistryCredentials(t *testing.T) {
+	cfg := defaultConfig()
+	for _, want := range []string{".npmrc", ".cargo/credentials.toml", ".cargo/credentials"} {
+		if !containsSequence(cfg.HomeBlock, want) {
+			t.Errorf("home_block = %v, want it to include %s", cfg.HomeBlock, want)
+		}
+	}
+}
+
 // TestLoadConfigRejectsNonLoopbackWebAddr pins the defence-in-depth gate:
 // enabling web mode with a routable bind address must fail to load.
 func TestLoadConfigRejectsNonLoopbackWebAddr(t *testing.T) {
@@ -117,6 +129,65 @@ func TestLoadLayeredConfigMergesLists(t *testing.T) {
 	}
 	if cfg.Broker.ApprovalTimeoutS != 42 {
 		t.Errorf("broker.approval_timeout_s = %d, want 42 (local omits broker)", cfg.Broker.ApprovalTimeoutS)
+	}
+}
+
+// TestLoadLayeredConfigMergesPathPrepend pins that path_prepend appends like
+// the other set-like lists and env_set merges per key, so a project only
+// names what it adds.
+func TestLoadLayeredConfigMergesPathPrepend(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	local := filepath.Join(dir, "local.json")
+	writeFile(t, base, `{"path_prepend":["/a"],"env_set":{"X":"1","Y":"2"}}`)
+	writeFile(t, local, `{"path_prepend":["/b"],"env_set":{"Y":"3"}}`)
+
+	cfg, err := loadLayeredConfig(base, local)
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	if want := []string{"/a", "/b"}; !reflect.DeepEqual(cfg.PathPrepend, want) {
+		t.Errorf("path_prepend = %v, want %v", cfg.PathPrepend, want)
+	}
+	if want := map[string]string{"X": "1", "Y": "3"}; !reflect.DeepEqual(cfg.EnvSet, want) {
+		t.Errorf("env_set = %v, want %v (per-key merge)", cfg.EnvSet, want)
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"~", "/home/u"},
+		{"~/x/y", "/home/u/x/y"},
+		{"/abs/path", "/abs/path"},
+		{"relative", "relative"},
+		{"", ""},
+		{"~user", "~user"}, // only a bare ~ or ~/ is expanded
+	}
+	for _, tc := range cases {
+		if got := expandHome(tc.in, "/home/u"); got != tc.want {
+			t.Errorf("expandHome(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestStateRootEnvArgs pins the bundle's shape: stable order, paths joined
+// under the root, and CARGO_INSTALL_ROOT resolving to the root itself.
+func TestStateRootEnvArgs(t *testing.T) {
+	args := stateRootEnvArgs("/root")
+	if !containsSequence(args, "--setenv", "CARGO_HOME", "/root/cargo") {
+		t.Errorf("missing CARGO_HOME; args: %v", args)
+	}
+	if !containsSequence(args, "--setenv", "UV_TOOL_BIN_DIR", "/root/bin") {
+		t.Errorf("missing UV_TOOL_BIN_DIR; args: %v", args)
+	}
+	if !containsSequence(args, "--setenv", "CARGO_INSTALL_ROOT", "/root") {
+		t.Errorf("CARGO_INSTALL_ROOT should resolve to the root itself; args: %v", args)
+	}
+	if !containsSequence(args, "--setenv", "GOMODCACHE", "/root/go/pkg/mod") {
+		t.Errorf("missing GOMODCACHE; args: %v", args)
+	}
+	if got, want := len(args), 3*len(stateRootEnv); got != want {
+		t.Errorf("len(args) = %d, want %d (3 per var)", got, want)
 	}
 }
 

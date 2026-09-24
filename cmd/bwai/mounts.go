@@ -58,10 +58,45 @@ func homeMounts(home string) []string {
 	}
 	// Apply sub-path overrides after all parent dirs are mounted.
 	// Blocked sub-paths must be hidden first, then allowed sub-paths can
-	// selectively re-expose specific files within blocked directories
-	args = append(args, subPathMounts(home, homeBlock, func(p string) []string { return tmpfs(p) })...)
+	// selectively re-expose specific files within blocked directories.
+	// Only directories get --tmpfs here; blocked *files* are masked by the
+	// caller (blockedSubPathFiles), since --tmpfs can't mount over a file.
+	args = append(args, subPathMounts(home, homeBlock, func(p string) []string {
+		if info, err := os.Stat(p); err != nil || !info.IsDir() {
+			return nil
+		}
+		return tmpfs(p)
+	})...)
 	args = append(args, subPathMounts(home, homeAllow, func(p string) []string { return rwBind(p) })...)
 	return args
+}
+
+// blockedSubPathFiles lists homeBlock sub-path entries that exist as
+// regular files. --tmpfs can only cover directories, so homeMounts leaves
+// these for the caller to mask with an empty --file (e.g. a cargo or npm
+// token file). An entry that home_allow also names is skipped, preserving
+// the documented rule that home_allow wins for sub-paths.
+func blockedSubPathFiles(home string, patterns, allowed []string) []string {
+	allowedPaths := make(map[string]bool, len(allowed))
+	for _, pattern := range allowed {
+		if strings.Contains(pattern, "/") {
+			allowedPaths[filepath.Join(home, pattern)] = true
+		}
+	}
+	var files []string
+	for _, pattern := range patterns {
+		if !strings.Contains(pattern, "/") {
+			continue
+		}
+		p := filepath.Join(home, pattern)
+		if allowedPaths[p] {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			files = append(files, p)
+		}
+	}
+	return files
 }
 
 // Bind /dev/shm (shared memory) if it exists on this host

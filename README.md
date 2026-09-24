@@ -124,6 +124,9 @@ Example `~/.bwai.json`:
     ".bashrc",
     ".bashrc.d",
     ".password-store",
+    ".npmrc",
+    ".cargo/credentials.toml",
+    ".cargo/credentials",
     ".bash_history*",
     ".config/Bitwarden",
     ".cache/nvidia"
@@ -162,7 +165,10 @@ Example `~/.bwai.json`:
     "COMMAND_CODE_API_KEY",
     "COMMANDCODE_API_URL",
     "CMD_LOCAL_ONLY",
-  ]
+  ],
+  "state_root": "",
+  "env_set": {},
+  "path_prepend": []
 }
 ```
 
@@ -174,19 +180,54 @@ Example `~/.bwai.json`:
 | `home_allow` | Dotfiles/dirs in `$HOME` the agent may read and write | see above |
 | `home_block` | Dotfiles/dirs in `$HOME` that are never exposed | see above |
 | `env_allow` | Environment variables from the host passed into the sandbox | see above |
+| `state_root` | Host directory mounted read-write as a persistent home for tool caches and installed binaries; see below | disabled |
+| `env_set` | Literal environment variables to set in the sandbox (`~` expanded) | none |
+| `path_prepend` | Directories prepended to the sandbox `PATH`, in order (`~` expanded) | none |
 | `broker` | Host-execution broker for letting specific commands escape the sandbox with user approval. See below. | disabled |
 
-`home_allow` takes precedence over `home_block`.
+For sub-paths (entries containing a `/`), `home_allow` is applied after `home_block` and so takes precedence. A direct (slash-free) name present in both lists is blocked, since blocked top-level entries are skipped entirely.
 
 ### Project-local config
 
-A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.bwai.json`, or `--config` if given). Its **set-like list fields** — `home_allow`, `home_block`, and `env_allow` — are *appended* to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
+A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended) and `env_set` (a map, merged per key) — are added to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
 
 ```json
 {
   "home_allow": [".rwe"]
 }
 ```
+
+### Persistent tool caches (`state_root`)
+
+By default the sandbox's package-manager caches are either ephemeral or read-only, and the host's real caches (`.npm`, `.cargo`, …) are still visible to the agent. To keep the sandbox's caches warm across sessions *without* sharing the host's, point `state_root` at a directory bwai owns:
+
+```json
+{
+  "state_root": "~/.bwai",
+  "home_block": [".npm", ".cargo", ".cache/pip", ".cache/uv"]
+}
+```
+
+bwai creates `~/.bwai`, mounts it read-write, points npm, yarn, pip, uv, cargo, go, bun, Playwright and Hugging Face at subdirectories of it, and prepends `~/.bwai/bin` to `PATH`. `home_block` hides the host's real caches, so the two never mix: the host's tools keep using `~/.npm`, `~/.cargo`, … while the sandbox writes to `~/.bwai/…`, which survives the session.
+
+Relocating `CARGO_HOME` also relocates cargo's config lookup, so copy your cargo config once:
+
+```sh
+mkdir -p ~/.bwai/cargo
+cp ~/.cargo/config.toml ~/.bwai/cargo/
+```
+
+`env_set` covers any variable the built-in bundle doesn't, and `path_prepend` adds directories ahead of `~/.bwai/bin`:
+
+```json
+{
+  "state_root": "~/.bwai",
+  "env_set": { "SOMETHING_HOME": "~/.bwai/something" },
+  "path_prepend": ["~/.bwai/extra-bin"]
+}
+```
+
+A leading `~` in `state_root`, `env_set` values, and `path_prepend` is expanded by bwai; bwrap expands neither `~` nor `$VAR`.
 
 ### Git worktrees
 

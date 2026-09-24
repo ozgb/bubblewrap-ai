@@ -26,6 +26,23 @@ type Config struct {
 	// Environment variables from the host that are passed into the sandbox
 	EnvAllow []string `json:"env_allow"`
 
+	// StateRoot is a host directory bwai creates and mounts read-write as a
+	// persistent home for tool caches and installed binaries. When set, bwai
+	// points the package managers it knows (npm, cargo, uv, go, pip, ...) at
+	// it and prepends <state_root>/bin to PATH, so the sandbox's caches stay
+	// warm across sessions while the host's own caches stay untouched. Empty
+	// disables the whole mechanism.
+	StateRoot string `json:"state_root"`
+
+	// EnvSet sets literal environment variables in the sandbox; values are
+	// ~-expanded. Applied after the state-root bundle, so it can override it.
+	// When config layers, entries merge per key rather than replacing.
+	EnvSet map[string]string `json:"env_set"`
+
+	// PathPrepend lists directories prepended to the sandbox PATH, in order
+	// and ahead of <state_root>/bin. ~ expanded.
+	PathPrepend []string `json:"path_prepend"`
+
 	// Worktrees exposes the repo's persistent worktree root when bwai is
 	// started inside a linked worktree, so `wt` worktrees survive the
 	// session (see worktreeSiblingMounts). Defaults to true.
@@ -141,10 +158,17 @@ func defaultConfig() Config {
 			".bashrc",
 			".bashrc.d",
 			".password-store",
+			// Registry API tokens, the same class as .ssh/.aws. .cargo is
+			// otherwise writable, so only its credential files are masked.
+			".npmrc",
+			".cargo/credentials.toml",
+			".cargo/credentials",
 			".bash_history*",
 			".config/Bitwarden",
 			".cache/nvidia",
 		},
+		EnvSet:      map[string]string{},
+		PathPrepend: []string{},
 		Broker: BrokerConfig{
 			Enabled:          false,
 			Prompt:           []string{"oob"},
@@ -170,10 +194,11 @@ func loadConfig(path string) (Config, error) {
 
 // loadLayeredConfig loads the base config at basePath (the global
 // ~/.bwai.json, or --config), then layers the project-local config at
-// localPath on top. Set-like list fields — home_allow, home_block and
-// env_allow — are appended to the base, so a project only names what it
-// adds. Everything else, including the argv lists command and
-// bwrap_extra_args, overrides. An empty localPath skips the second layer.
+// localPath on top. Set-like fields — home_allow, home_block, env_allow,
+// path_prepend and the env_set map — are added to the base (lists append,
+// env_set merges per key), so a project only names what it adds. Everything
+// else, including the argv lists command and bwrap_extra_args, overrides. An
+// empty localPath skips the second layer.
 // Missing files are not an error.
 func loadLayeredConfig(basePath, localPath string) (Config, error) {
 	cfg := defaultConfig()
@@ -213,11 +238,12 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 	// Snapshot the base lists before decoding: json.Unmarshal reuses a
 	// slice's backing array, so appending afterwards would otherwise see the
 	// local values already in place.
-	var prevAllow, prevBlock, prevEnv []string
+	var prevAllow, prevBlock, prevEnv, prevPath []string
 	if merge {
 		prevAllow = append([]string(nil), cfg.HomeAllow...)
 		prevBlock = append([]string(nil), cfg.HomeBlock...)
 		prevEnv = append([]string(nil), cfg.EnvAllow...)
+		prevPath = append([]string(nil), cfg.PathPrepend...)
 	}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return false, fmt.Errorf("%s: %w", path, err)
@@ -231,6 +257,9 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 		}
 		if _, ok := keys["env_allow"]; ok {
 			cfg.EnvAllow = appendStrings(prevEnv, cfg.EnvAllow)
+		}
+		if _, ok := keys["path_prepend"]; ok {
+			cfg.PathPrepend = appendStrings(prevPath, cfg.PathPrepend)
 		}
 	}
 	return true, nil

@@ -100,7 +100,7 @@ func TestHomeMounts(t *testing.T) {
 	})
 
 	homeAllow = []string{".claude", ".config/goose"}
-	homeBlock = []string{".ssh", ".config/secret"}
+	homeBlock = []string{".ssh", ".config/secret", ".config/token"}
 
 	mkDir := func(rel string) string {
 		p := filepath.Join(home, rel)
@@ -111,18 +111,22 @@ func TestHomeMounts(t *testing.T) {
 	}
 	mkFile := func(rel string) string {
 		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(p, nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 		return p
 	}
 
-	claudeDir := mkDir(".claude")        // allowed directory: --bind
-	_ = mkDir(".ssh")                    // blocked directory: not mounted
-	vimDir := mkDir(".vim")              // unclassified dotdir: --ro-bind
-	_ = mkFile("README.md")              // non-dotfile: not mounted
-	gooseDir := mkDir(".config/goose")   // allowed sub-path: --bind (last)
-	secretDir := mkDir(".config/secret") // blocked sub-path: --tmpfs (before allowed)
+	claudeDir := mkDir(".claude")         // allowed directory: --bind
+	_ = mkDir(".ssh")                     // blocked directory: not mounted
+	vimDir := mkDir(".vim")               // unclassified dotdir: --ro-bind
+	_ = mkFile("README.md")               // non-dotfile: not mounted
+	gooseDir := mkDir(".config/goose")    // allowed sub-path: --bind (last)
+	secretDir := mkDir(".config/secret")  // blocked sub-path dir: --tmpfs (before allowed)
+	secretFile := mkFile(".config/token") // blocked sub-path file: masked by caller, not --tmpfs
 
 	args := homeMounts(home)
 
@@ -160,6 +164,12 @@ func TestHomeMounts(t *testing.T) {
 		}
 	})
 
+	t.Run("blocked sub-path file is not tmpfs'd", func(t *testing.T) {
+		if containsSequence(args, "--tmpfs", secretFile) {
+			t.Errorf("blocked file %q must not get --tmpfs (bwrap rejects a file target); args: %v", secretFile, args)
+		}
+	})
+
 	t.Run("allowed sub-path gets rw-bind", func(t *testing.T) {
 		if !containsSequence(args, "--bind", gooseDir, gooseDir) {
 			t.Errorf("expected --bind for allowed sub-path %q; args: %v", gooseDir, args)
@@ -176,6 +186,40 @@ func TestHomeMounts(t *testing.T) {
 			t.Errorf("--tmpfs for blocked sub-path (idx %d) must come before --bind for allowed sub-path (idx %d)", iBlocked, iAllowed)
 		}
 	})
+}
+
+// TestBlockedSubPathFiles pins the split that makes file masking possible:
+// only blocked sub-paths that are regular files are returned, since
+// homeMounts handles directories and the caller masks files.
+func TestBlockedSubPathFiles(t *testing.T) {
+	home := t.TempDir()
+	writeFile := func(rel string) string {
+		p := filepath.Join(home, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("token = \"x\"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	file := writeFile(".cargo/credentials.toml")
+	allowedFile := writeFile(".cargo/allowed.toml")
+	dir := filepath.Join(home, ".config", "secret")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := blockedSubPathFiles(home, []string{
+		".npmrc",                  // direct: handled as absent, not returned
+		".cargo/credentials.toml", // file: returned
+		".config/secret",          // directory: homeMounts tmpfs's it
+		".cargo/missing",          // absent: skipped
+		".cargo/allowed.toml",     // blocked but also allowed: allow wins
+	}, []string{".cargo/allowed.toml"})
+	if len(got) != 1 || got[0] != file {
+		t.Errorf("blockedSubPathFiles = %v, want [%s] (allowedFile %s must be excluded)", got, file, allowedFile)
+	}
 }
 
 func TestReadGitdirPointer(t *testing.T) {
