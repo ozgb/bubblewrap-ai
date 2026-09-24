@@ -154,6 +154,88 @@ func TestLoadLayeredConfigMergesPathPrepend(t *testing.T) {
 	}
 }
 
+func TestDefaultStateRoot(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	if got, want := defaultStateRoot("/home/u"), "/home/u/.local/share/bwai"; got != want {
+		t.Errorf("defaultStateRoot = %q, want %q", got, want)
+	}
+	t.Setenv("XDG_DATA_HOME", "/xdg/data")
+	if got, want := defaultStateRoot("/home/u"), "/xdg/data/bwai"; got != want {
+		t.Errorf("defaultStateRoot with XDG_DATA_HOME = %q, want %q", got, want)
+	}
+}
+
+func TestResolveStateRoot(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "")
+	empty := ""
+	custom := "~/x"
+	cases := []struct {
+		in   *string
+		want string
+	}{
+		{nil, "/home/u/.local/share/bwai"},
+		{&empty, ""},
+		{&custom, "/home/u/x"},
+	}
+	for _, tc := range cases {
+		if got := resolveStateRoot(tc.in, "/home/u"); got != tc.want {
+			t.Errorf("resolveStateRoot(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDefaultConfigPath(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
+	if got, want := defaultConfigPath(), "/xdg/config/bwai/config.json"; got != want {
+		t.Errorf("defaultConfigPath = %q, want %q", got, want)
+	}
+	// With XDG_CONFIG_HOME unset it must still end in bwai/config.json.
+	t.Setenv("XDG_CONFIG_HOME", "")
+	got := defaultConfigPath()
+	if filepath.Base(got) != "config.json" || filepath.Base(filepath.Dir(got)) != "bwai" {
+		t.Errorf("defaultConfigPath = %q, want .../bwai/config.json", got)
+	}
+}
+
+func TestResolveConfigPath(t *testing.T) {
+	home := t.TempDir()
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	xdgPath := filepath.Join(xdg, "bwai", "config.json")
+	legacyPath := filepath.Join(home, ".bwai.json")
+
+	// An explicit --config wins even when both files exist.
+	writeFile(t, legacyPath, "{}")
+	if got, legacy := resolveConfigPath("/explicit.json", home); got != "/explicit.json" || legacy {
+		t.Errorf("explicit = (%q, %v), want (/explicit.json, false)", got, legacy)
+	}
+
+	// Only the legacy file exists: use it, and flag it.
+	if got, legacy := resolveConfigPath("", home); got != legacyPath || !legacy {
+		t.Errorf("legacy-only = (%q, %v), want (%q, true)", got, legacy, legacyPath)
+	}
+
+	// Once the XDG file exists it wins, with no deprecation flag.
+	if err := os.MkdirAll(filepath.Dir(xdgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, xdgPath, "{}")
+	if got, legacy := resolveConfigPath("", home); got != xdgPath || legacy {
+		t.Errorf("xdg = (%q, %v), want (%q, false)", got, legacy, xdgPath)
+	}
+
+	// Neither exists: return the XDG path so its creation is natural.
+	if err := os.Remove(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(xdgPath); err != nil {
+		t.Fatal(err)
+	}
+	if got, legacy := resolveConfigPath("", home); got != xdgPath || legacy {
+		t.Errorf("neither = (%q, %v), want (%q, false)", got, legacy, xdgPath)
+	}
+}
+
 func TestExpandHome(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"~", "/home/u"},

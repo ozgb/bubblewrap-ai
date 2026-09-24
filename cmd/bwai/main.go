@@ -57,7 +57,7 @@ func main() {
 func runSandbox() int {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	dumpConfig := flag.Bool("dump-config", false, "Print the default configuration JSON and exit")
-	configFlag := flag.String("config", "", "Path to a config file (overrides ~/.bwai.json)")
+	configFlag := flag.String("config", "", "Path to a config file (overrides ~/.config/bwai/config.json)")
 	commandFlag := flag.String("command", "", "Command to run inside the sandbox (overrides config and default)")
 	flag.StringVar(commandFlag, "c", "", "Shorthand for --command")
 	flag.Parse()
@@ -89,9 +89,9 @@ func runSandbox() int {
 		return 1
 	}
 
-	configPath := filepath.Join(home, ".bwai.json")
-	if *configFlag != "" {
-		configPath = *configFlag
+	configPath, legacyConfig := resolveConfigPath(*configFlag, home)
+	if legacyConfig {
+		fmt.Fprintf(os.Stderr, "bwai: %s is deprecated; move it to %s\n", configPath, defaultConfigPath())
 	}
 	// A .bwai.json in the sandbox root layers on top of the global config:
 	// its list fields are appended, everything else overrides. Skip it if
@@ -109,8 +109,9 @@ func runSandbox() int {
 
 	// Persistent state root: created on the host and bound read-write below
 	// so tool caches and installed binaries survive the session without
-	// exposing the host's own caches.
-	stateRoot := expandHome(cfg.StateRoot, home)
+	// exposing the host's own caches. Omitted state_root defaults to the XDG
+	// data dir; an explicit "" disables the mechanism.
+	stateRoot := resolveStateRoot(cfg.StateRoot, home)
 	if stateRoot != "" {
 		if err := os.MkdirAll(filepath.Join(stateRoot, "bin"), 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: warning: state_root %s: %v\n", stateRoot, err)
@@ -416,6 +417,53 @@ func stateRootEnvArgs(root string) []string {
 		args = append(args, "--setenv", key, filepath.Join(root, stateRootEnv[key]))
 	}
 	return args
+}
+
+// defaultConfigPath is the global config location: $XDG_CONFIG_HOME/bwai/
+// config.json, falling back to ~/.config/bwai/config.json.
+func defaultConfigPath() string {
+	if dir, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(dir, "bwai", "config.json")
+	}
+	return filepath.Join(".config", "bwai", "config.json")
+}
+
+// resolveConfigPath picks the base config file. An explicit --config wins.
+// Otherwise the XDG location is used when it exists, falling back to the
+// legacy ~/.bwai.json so existing configs keep working. legacy reports that
+// fallback, for a deprecation notice.
+func resolveConfigPath(explicit, home string) (path string, legacy bool) {
+	if explicit != "" {
+		return explicit, false
+	}
+	xdg := defaultConfigPath()
+	if _, err := os.Stat(xdg); err == nil {
+		return xdg, false
+	}
+	old := filepath.Join(home, ".bwai.json")
+	if _, err := os.Stat(old); err == nil {
+		return old, true
+	}
+	return xdg, false
+}
+
+// defaultStateRoot is where persistent tool caches live when state_root is
+// omitted: $XDG_DATA_HOME/bwai, falling back to ~/.local/share/bwai.
+func defaultStateRoot(home string) string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "bwai")
+	}
+	return filepath.Join(home, ".local", "share", "bwai")
+}
+
+// resolveStateRoot picks the effective state root: the XDG data dir when
+// state_root is omitted, "" when explicitly disabled, else the configured
+// path with ~ expanded.
+func resolveStateRoot(sr *string, home string) string {
+	if sr == nil {
+		return defaultStateRoot(home)
+	}
+	return expandHome(*sr, home)
 }
 
 // expandHome expands a leading ~ (or a bare ~) against the sandbox home.

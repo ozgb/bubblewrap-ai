@@ -30,9 +30,10 @@ type Config struct {
 	// persistent home for tool caches and installed binaries. When set, bwai
 	// points the package managers it knows (npm, cargo, uv, go, pip, ...) at
 	// it and prepends <state_root>/bin to PATH, so the sandbox's caches stay
-	// warm across sessions while the host's own caches stay untouched. Empty
-	// disables the whole mechanism.
-	StateRoot string `json:"state_root"`
+	// warm across sessions while the host's own caches stay untouched.
+	// Omitted, it defaults to $XDG_DATA_HOME/bwai (~/.local/share/bwai); set
+	// it to "" to disable the mechanism.
+	StateRoot *string `json:"state_root"`
 
 	// EnvSet sets literal environment variables in the sandbox; values are
 	// ~-expanded. Applied after the state-root bundle, so it can override it.
@@ -193,8 +194,8 @@ func loadConfig(path string) (Config, error) {
 }
 
 // loadLayeredConfig loads the base config at basePath (the global
-// ~/.bwai.json, or --config), then layers the project-local config at
-// localPath on top. Set-like fields — home_allow, home_block, env_allow,
+// ~/.config/bwai/config.json, or --config), then layers the project-local
+// config at localPath on top. Set-like fields — home_allow, home_block, env_allow,
 // path_prepend and the env_set map — are added to the base (lists append,
 // env_set merges per key), so a project only names what it adds. Everything
 // else, including the argv lists command and bwrap_extra_args, overrides. An

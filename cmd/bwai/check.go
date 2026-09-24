@@ -42,7 +42,7 @@ func runBrokerCLI(args []string) int {
 func runBrokerCheck(args []string) int {
 	fs := flag.NewFlagSet("broker check", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	configFlag := fs.String("config", "", "Path to a config file (overrides ~/.bwai.json)")
+	configFlag := fs.String("config", "", "Path to a config file (overrides ~/.config/bwai/config.json)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -60,7 +60,11 @@ func runBrokerCheck(args []string) int {
 			fmt.Fprintf(os.Stderr, "bwai broker check: cannot determine home: %v\n", err)
 			return 2
 		}
-		configPath = filepath.Join(home, ".bwai.json")
+		var legacy bool
+		configPath, legacy = resolveConfigPath("", home)
+		if legacy {
+			fmt.Fprintf(os.Stderr, "bwai broker check: %s is deprecated; move it to %s\n", configPath, defaultConfigPath())
+		}
 	}
 	localPath := ""
 	if cwd, err := os.Getwd(); err == nil {

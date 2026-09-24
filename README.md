@@ -53,7 +53,7 @@ By default, `bwai` opens a sandboxed `bash` shell. From there you can launch any
 
 To skip the shell and launch an agent (or any command) directly, you can either:
 
-1. Set the `command` field in `~/.bwai.json`:
+1. Set the `command` field in `~/.config/bwai/config.json`:
 
 ```json
 { "command": ["claude"] }
@@ -66,7 +66,7 @@ bwai --command claude
 
 ```
 
-To append arguments to the command configured in `~/.bwai.json`, use `--`:
+To append arguments to the command configured in `~/.config/bwai/config.json`, use `--`:
 
 ```sh
 # With "command": ["goose"] in config
@@ -80,7 +80,7 @@ Everything after `--` is passed as extra arguments to the resolved command.
 
 ## Configuration
 
-`bwai` works out of the box with no config file. To customise behaviour, create `~/.bwai.json` as a global config. This can be overridden per-run with the `--config` flag:
+`bwai` works out of the box with no config file. To customise behaviour, create `~/.config/bwai/config.json` (respecting `$XDG_CONFIG_HOME`) as a global config. The legacy `~/.bwai.json` is read only when that file is absent, and prints a deprecation notice. Either can be overridden per-run with the `--config` flag:
 
 ```sh
 bwai --config /path/to/my-config.json
@@ -89,10 +89,10 @@ bwai --config /path/to/my-config.json
 To see the full default configuration as a starting point, run:
 
 ```sh
-bwai --dump-config > ~/.bwai.json
+bwai --dump-config > ~/.config/bwai/config.json
 ```
 
-Example `~/.bwai.json`:
+Example `~/.config/bwai/config.json`:
 
 ```json
 {
@@ -166,7 +166,7 @@ Example `~/.bwai.json`:
     "COMMANDCODE_API_URL",
     "CMD_LOCAL_ONLY",
   ],
-  "state_root": "",
+  "state_root": null,
   "env_set": {},
   "path_prepend": []
 }
@@ -180,7 +180,7 @@ Example `~/.bwai.json`:
 | `home_allow` | Dotfiles/dirs in `$HOME` the agent may read and write | see above |
 | `home_block` | Dotfiles/dirs in `$HOME` that are never exposed | see above |
 | `env_allow` | Environment variables from the host passed into the sandbox | see above |
-| `state_root` | Host directory mounted read-write as a persistent home for tool caches and installed binaries; see below | disabled |
+| `state_root` | Host directory mounted read-write as a persistent home for tool caches and installed binaries; `null` uses the data dir, `""` disables. See below | `$XDG_DATA_HOME/bwai` (`~/.local/share/bwai`) |
 | `env_set` | Literal environment variables to set in the sandbox (`~` expanded) | none |
 | `path_prepend` | Directories prepended to the sandbox `PATH`, in order (`~` expanded) | none |
 | `broker` | Host-execution broker for letting specific commands escape the sandbox with user approval. See below. | disabled |
@@ -189,7 +189,7 @@ For sub-paths (entries containing a `/`), `home_allow` is applied after `home_bl
 
 ### Project-local config
 
-A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended) and `env_set` (a map, merged per key) — are added to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
+A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/config.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended) and `env_set` (a map, merged per key) — are added to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
 
 ```json
 {
@@ -199,25 +199,24 @@ A `.bwai.json` in the directory you run `bwai` from is layered on top of the bas
 
 ### Persistent tool caches (`state_root`)
 
-By default the sandbox's package-manager caches are either ephemeral or read-only, and the host's real caches (`.npm`, `.cargo`, …) are still visible to the agent. To keep the sandbox's caches warm across sessions *without* sharing the host's, point `state_root` at a directory bwai owns:
+The sandbox's package-manager caches persist on the host under `state_root`, which defaults to `$XDG_DATA_HOME/bwai` (`~/.local/share/bwai`). bwai creates it, mounts it read-write, points npm, yarn, pip, uv, cargo, go, bun, Playwright and Hugging Face at subdirectories of it, and prepends `<state_root>/bin` to `PATH` — so caches stay warm across sessions while the host's own caches are left alone.
+
+The host's real caches (`.npm`, `.cargo`, …) are still read-only visible to the agent. To hide them and guarantee the two never mix, block them:
 
 ```json
 {
-  "state_root": "~/.bwai",
   "home_block": [".npm", ".cargo", ".cache/pip", ".cache/uv"]
 }
 ```
 
-bwai creates `~/.bwai`, mounts it read-write, points npm, yarn, pip, uv, cargo, go, bun, Playwright and Hugging Face at subdirectories of it, and prepends `~/.bwai/bin` to `PATH`. `home_block` hides the host's real caches, so the two never mix: the host's tools keep using `~/.npm`, `~/.cargo`, … while the sandbox writes to `~/.bwai/…`, which survives the session.
-
 Relocating `CARGO_HOME` also relocates cargo's config lookup, so copy your cargo config once:
 
 ```sh
-mkdir -p ~/.bwai/cargo
-cp ~/.cargo/config.toml ~/.bwai/cargo/
+mkdir -p ~/.local/share/bwai/cargo
+cp ~/.cargo/config.toml ~/.local/share/bwai/cargo/
 ```
 
-`env_set` covers any variable the built-in bundle doesn't, and `path_prepend` adds directories ahead of `~/.bwai/bin`:
+Set `state_root` to move the whole thing elsewhere, or to `""` to disable it:
 
 ```json
 {
@@ -227,7 +226,7 @@ cp ~/.cargo/config.toml ~/.bwai/cargo/
 }
 ```
 
-A leading `~` in `state_root`, `env_set` values, and `path_prepend` is expanded by bwai; bwrap expands neither `~` nor `$VAR`.
+`env_set` covers any variable the built-in bundle doesn't, and `path_prepend` adds directories ahead of `<state_root>/bin`. A leading `~` in `state_root`, `env_set` values, and `path_prepend` is expanded by bwai; bwrap expands neither `~` nor `$VAR`.
 
 ### Git worktrees
 
@@ -249,7 +248,7 @@ With it off, worktrees still get the persistent root, the shared git dir, and fu
 
 Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — `git commit -S` needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`. The broker lets specific argv lists escape to the host with per-command rules.
 
-Enable it by adding a `broker` block to `~/.bwai.json`:
+Enable it by adding a `broker` block to `~/.config/bwai/config.json`:
 
 ```json
 {
