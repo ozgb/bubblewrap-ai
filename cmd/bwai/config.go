@@ -194,7 +194,7 @@ func loadConfig(path string) (Config, error) {
 }
 
 // loadLayeredConfig loads the base config at basePath (the global
-// ~/.config/bwai/config.json, or --config), then layers the project-local
+// ~/.config/bwai/bwai.json, or --config), then layers the project-local
 // config at localPath on top. Set-like fields — home_allow, home_block, env_allow,
 // path_prepend and the env_set map — are added to the base (lists append,
 // env_set merges per key), so a project only names what it adds. Everything

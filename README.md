@@ -53,7 +53,7 @@ By default, `bwai` opens a sandboxed `bash` shell. From there you can launch any
 
 To skip the shell and launch an agent (or any command) directly, you can either:
 
-1. Set the `command` field in `~/.config/bwai/config.json`:
+1. Set the `command` field in `~/.config/bwai/bwai.json`:
 
 ```json
 { "command": ["claude"] }
@@ -66,7 +66,7 @@ bwai --command claude
 
 ```
 
-To append arguments to the command configured in `~/.config/bwai/config.json`, use `--`:
+To append arguments to the command configured in `~/.config/bwai/bwai.json`, use `--`:
 
 ```sh
 # With "command": ["goose"] in config
@@ -80,7 +80,7 @@ Everything after `--` is passed as extra arguments to the resolved command.
 
 ## Configuration
 
-`bwai` works out of the box with no config file. To customise behaviour, create `~/.config/bwai/config.json` (respecting `$XDG_CONFIG_HOME`) as a global config. The legacy `~/.bwai.json` is read only when that file is absent, and prints a deprecation notice. Either can be overridden per-run with the `--config` flag:
+`bwai` works out of the box with no config file. To customise behaviour, create `~/.config/bwai/bwai.json` (respecting `$XDG_CONFIG_HOME`) as a global config. The legacy `~/.bwai.json` is read only when that file is absent, and prints a deprecation notice. Either can be overridden per-run with the `--config` flag:
 
 ```sh
 bwai --config /path/to/my-config.json
@@ -89,10 +89,10 @@ bwai --config /path/to/my-config.json
 To see the full default configuration as a starting point, run:
 
 ```sh
-bwai --dump-config > ~/.config/bwai/config.json
+bwai --dump-config > ~/.config/bwai/bwai.json
 ```
 
-Example `~/.config/bwai/config.json`:
+Example `~/.config/bwai/bwai.json`:
 
 ```json
 {
@@ -189,7 +189,7 @@ For sub-paths (entries containing a `/`), `home_allow` is applied after `home_bl
 
 ### Project-local config
 
-A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/config.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended) and `env_set` (a map, merged per key) — are added to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
+A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended) and `env_set` (a map, merged per key) — are added to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
 
 ```json
 {
@@ -248,7 +248,7 @@ With it off, worktrees still get the persistent root, the shared git dir, and fu
 
 Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — `git commit -S` needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`. The broker lets specific argv lists escape to the host with per-command rules.
 
-Enable it by adding a `broker` block to `~/.config/bwai/config.json`:
+Enable it by adding a `broker` block to `~/.config/bwai/bwai.json`:
 
 ```json
 {

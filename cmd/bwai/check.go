@@ -42,7 +42,7 @@ func runBrokerCLI(args []string) int {
 func runBrokerCheck(args []string) int {
 	fs := flag.NewFlagSet("broker check", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	configFlag := fs.String("config", "", "Path to a config file (overrides ~/.config/bwai/config.json)")
+	configFlag := fs.String("config", "", "Path to a config file (overrides ~/.config/bwai/bwai.json)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

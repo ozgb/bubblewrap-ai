@@ -57,7 +57,7 @@ func main() {
 func runSandbox() int {
 	versionFlag := flag.Bool("version", false, "Print version and exit")
 	dumpConfig := flag.Bool("dump-config", false, "Print the default configuration JSON and exit")
-	configFlag := flag.String("config", "", "Path to a config file (overrides ~/.config/bwai/config.json)")
+	configFlag := flag.String("config", "", "Path to a config file (overrides ~/.config/bwai/bwai.json)")
 	commandFlag := flag.String("command", "", "Command to run inside the sandbox (overrides config and default)")
 	flag.StringVar(commandFlag, "c", "", "Shorthand for --command")
 	flag.Parse()
@@ -420,12 +420,12 @@ func stateRootEnvArgs(root string) []string {
 }
 
 // defaultConfigPath is the global config location: $XDG_CONFIG_HOME/bwai/
-// config.json, falling back to ~/.config/bwai/config.json.
+// bwai.json, falling back to ~/.config/bwai/bwai.json.
 func defaultConfigPath() string {
 	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "bwai", "config.json")
+		return filepath.Join(dir, "bwai", "bwai.json")
 	}
-	return filepath.Join(".config", "bwai", "config.json")
+	return filepath.Join(".config", "bwai", "bwai.json")
 }
 
 // resolveConfigPath picks the base config file. An explicit --config wins.

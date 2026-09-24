@@ -186,14 +186,14 @@ func TestResolveStateRoot(t *testing.T) {
 
 func TestDefaultConfigPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/xdg/config")
-	if got, want := defaultConfigPath(), "/xdg/config/bwai/config.json"; got != want {
+	if got, want := defaultConfigPath(), "/xdg/config/bwai/bwai.json"; got != want {
 		t.Errorf("defaultConfigPath = %q, want %q", got, want)
 	}
-	// With XDG_CONFIG_HOME unset it must still end in bwai/config.json.
+	// With XDG_CONFIG_HOME unset it must still end in bwai/bwai.json.
 	t.Setenv("XDG_CONFIG_HOME", "")
 	got := defaultConfigPath()
-	if filepath.Base(got) != "config.json" || filepath.Base(filepath.Dir(got)) != "bwai" {
-		t.Errorf("defaultConfigPath = %q, want .../bwai/config.json", got)
+	if filepath.Base(got) != "bwai.json" || filepath.Base(filepath.Dir(got)) != "bwai" {
+		t.Errorf("defaultConfigPath = %q, want .../bwai/bwai.json", got)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestResolveConfigPath(t *testing.T) {
 	home := t.TempDir()
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
-	xdgPath := filepath.Join(xdg, "bwai", "config.json")
+	xdgPath := filepath.Join(xdg, "bwai", "bwai.json")
 	legacyPath := filepath.Join(home, ".bwai.json")
 
 	// An explicit --config wins even when both files exist.
