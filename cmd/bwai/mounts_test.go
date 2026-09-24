@@ -385,6 +385,131 @@ func TestWorktreeRootMounts(t *testing.T) {
 	})
 }
 
+// makeLinkedWorktree builds a main checkout plus one linked worktree and
+// returns both paths. The layout mirrors real git: the worktree's .git
+// file points at a gitdir nested under the main .git, whose commondir
+// climbs back to the main .git.
+func makeLinkedWorktree(t *testing.T) (main, wt string) {
+	t.Helper()
+	base := t.TempDir()
+	main = filepath.Join(base, "main")
+	wt = filepath.Join(base, "wt")
+	gitDir := filepath.Join(main, ".git", "worktrees", "wt")
+	for _, d := range []string{main, wt, gitDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(main, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "gitdir"), []byte(wt+"/.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return main, wt
+}
+
+func TestWorktreeSiblingMounts(t *testing.T) {
+	t.Run("expose_main binds main tree and managed root", func(t *testing.T) {
+		main, wt := makeLinkedWorktree(t)
+		args, root, mainTree, err := worktreeSiblingMounts(wt, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantRoot := filepath.Join(filepath.Dir(main), ".main.worktrees")
+		if root != wantRoot || mainTree != main {
+			t.Errorf("root=%q mainTree=%q, want %q/%q", root, mainTree, wantRoot, main)
+		}
+		if !containsSequence(args, "--bind", main, main) {
+			t.Errorf("expected --bind of main tree %q; args: %v", main, args)
+		}
+		if !containsSequence(args, "--bind", wantRoot, wantRoot) {
+			t.Errorf("expected --bind of managed root %q; args: %v", wantRoot, args)
+		}
+		if info, err := os.Stat(wantRoot); err != nil || !info.IsDir() {
+			t.Errorf("managed root not created on disk: err=%v", err)
+		}
+	})
+
+	t.Run("expose_main=false binds only the managed root", func(t *testing.T) {
+		main, wt := makeLinkedWorktree(t)
+		args, _, mainTree, err := worktreeSiblingMounts(wt, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mainTree != main || !strings.Contains(strings.Join(args, " "), ".main.worktrees") {
+			t.Fatalf("expected managed root bind, got args=%v mainTree=%q", args, mainTree)
+		}
+		if containsSequence(args, "--bind", main, main) {
+			t.Errorf("main tree %q must not be bound when expose_main is off; args: %v", main, args)
+		}
+	})
+
+	t.Run("main checkout yields nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		args, root, mainTree, err := worktreeSiblingMounts(dir, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args != nil || root != "" || mainTree != "" {
+			t.Errorf("expected nothing, got args=%v root=%q mainTree=%q", args, root, mainTree)
+		}
+	})
+
+	t.Run("non-git dir yields nothing", func(t *testing.T) {
+		args, root, mainTree, err := worktreeSiblingMounts(t.TempDir(), true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args != nil || root != "" || mainTree != "" {
+			t.Errorf("expected nothing, got args=%v root=%q mainTree=%q", args, root, mainTree)
+		}
+	})
+
+	t.Run("worktree-of-worktree yields nothing", func(t *testing.T) {
+		// The "main" tree itself has a .git *file*, so no main checkout can
+		// be derived and the managed-root name would not match the one a
+		// main-checkout session computes.
+		base := t.TempDir()
+		outer := filepath.Join(base, "outer")
+		inner := filepath.Join(base, "inner")
+		for _, d := range []string{outer, inner} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		gitDir := filepath.Join(base, "shared", "gitdir")
+		if err := os.MkdirAll(gitDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte(".\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outer, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(inner, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		args, root, mainTree, err := worktreeSiblingMounts(inner, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if args != nil || root != "" || mainTree != "" {
+			t.Errorf("expected nothing, got args=%v root=%q mainTree=%q", args, root, mainTree)
+		}
+	})
+}
+
 func TestGitWorktreeMounts(t *testing.T) {
 	t.Run("ordinary checkout returns nil", func(t *testing.T) {
 		dir := t.TempDir()

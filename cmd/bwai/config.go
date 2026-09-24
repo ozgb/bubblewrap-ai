@@ -26,9 +26,23 @@ type Config struct {
 	// Environment variables from the host that are passed into the sandbox
 	EnvAllow []string `json:"env_allow"`
 
+	// Worktrees exposes the repo's persistent worktree root when bwai is
+	// started inside a linked worktree, so `wt` worktrees survive the
+	// session (see worktreeSiblingMounts). Defaults to true.
+	Worktrees *WorktreesConfig `json:"worktrees"`
+
 	// Host-execution broker: lets specific argv lists escape the sandbox
 	// with user approval. See docs/broker.md.
 	Broker BrokerConfig `json:"broker"`
+}
+
+// WorktreesConfig tunes worktree exposure. ExposeMain controls whether
+// the main checkout's working tree is mounted read-write when bwai
+// starts in a linked worktree — on by default, off for the paranoid
+// (another agent may hold the main tree, or you may simply not trust
+// writes outside the sandbox root).
+type WorktreesConfig struct {
+	ExposeMain bool `json:"expose_main"`
 }
 
 // BrokerConfig is the nested broker.* block. Disabled by default;
@@ -58,6 +72,7 @@ func defaultConfig() Config {
 		BwrapPath:      "bwrap",
 		BwrapExtraArgs: []string{"--unshare-pid", "--unshare-ipc"},
 		Command:        []string{"bash"},
+		Worktrees:      &WorktreesConfig{ExposeMain: true},
 		EnvAllow: []string{
 			"TERM",
 			"COLORTERM",

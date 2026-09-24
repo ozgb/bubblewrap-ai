@@ -13,7 +13,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 		{Match: []string{"git-safe", "push"}, Action: ActionConfirm},
 		{Match: []string{"gh", "pr", "create", "**"}, Action: ActionConfirm},
 	}
-	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees"); err != nil {
+	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -48,7 +48,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 // be absent rather than advertising a path that does not exist.
 func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil, ""); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -62,7 +62,7 @@ func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
 
 func TestInstallAgentMemoryFileNoRules(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil, ""); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -73,6 +73,30 @@ func TestInstallAgentMemoryFileNoRules(t *testing.T) {
 	// so rather than showing an empty table.
 	if !strings.Contains(string(got), "no rules configured") {
 		t.Errorf("deny-all should be stated explicitly:\n%s", got)
+	}
+}
+
+// A worktree start must name both writable locations when expose_main is
+// on, and must record the hiding when it is off.
+func TestRenderWorktreeSectionWorktreeStart(t *testing.T) {
+	root := "/home/u/.proj.worktrees"
+	main := "/home/u/proj"
+
+	exposed := renderWorktreeSection(root, main, true)
+	if !strings.Contains(exposed, "`"+root+"` and the main checkout at `"+main+"`") {
+		t.Errorf("expose_main wording missing both roots:\n%s", exposed)
+	}
+	hidden := renderWorktreeSection(root, main, false)
+	if !strings.Contains(hidden, "main checkout is not exposed") {
+		t.Errorf("hidden-main wording missing:\n%s", hidden)
+	}
+	if strings.Contains(hidden, "`"+main+"`") {
+		t.Errorf("hidden wording must not name the main tree:\n%s", hidden)
+	}
+	for _, s := range []string{exposed, hidden} {
+		if strings.Contains(s, "{{") {
+			t.Errorf("unrendered placeholder:\n%s", s)
+		}
 	}
 }
 

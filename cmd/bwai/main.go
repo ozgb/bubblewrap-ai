@@ -117,10 +117,28 @@ func runSandbox() int {
 	// would land on the sandbox's tmpfs home and vanish with the session.
 	// Bind a dedicated host root and point worktrunk at it below. Computed
 	// before the broker so the agent memory below can name the path.
+	// Starting in a linked worktree resolves the same root via the main
+	// tree, so all sessions of a repo share one root.
+	var startedInWorktree bool
+	var worktreeMainTree string
+	exposeMain := cfg.Worktrees == nil || cfg.Worktrees.ExposeMain
 	worktreeMounts, worktreeRoot, err := worktreeRootMounts(currentDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bwai: warning: could not prepare worktree root: %v\n", err)
 		worktreeMounts, worktreeRoot = nil, ""
+	}
+	if worktreeRoot == "" {
+		var mainTree string
+		siblingMounts, siblingRoot, mainTree, serr := worktreeSiblingMounts(currentDir, exposeMain)
+		if serr != nil {
+			fmt.Fprintf(os.Stderr, "bwai: warning: could not prepare worktree root: %v\n", serr)
+			siblingMounts, siblingRoot = nil, ""
+		}
+		if siblingRoot != "" {
+			startedInWorktree = true
+			worktreeMainTree = mainTree
+		}
+		worktreeMounts, worktreeRoot = siblingMounts, siblingRoot
 	}
 
 	// Optionally start the host-execution broker. The broker exposes
@@ -128,7 +146,13 @@ func runSandbox() int {
 	// into the sandbox below.
 	var broker *Broker
 	if cfg.Broker.Enabled {
-		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(home), worktreeRoot)
+		// Every root the sandbox got rw is accepted as request cwd.
+		// currentDir is always revealed; expose_main adds the main tree.
+		roots := []string{worktreeRoot}
+		if startedInWorktree && exposeMain && worktreeMainTree != "" {
+			roots = append(roots, worktreeMainTree)
+		}
+		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(home), roots...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: broker init failed: %v\n", err)
 			return 1
@@ -138,7 +162,7 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
-		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot); err != nil {
+		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot, worktreeMainTree, exposeMain); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: install agent memory: %v\n", err)
 			_ = broker.Close()
 			return 1
@@ -167,6 +191,13 @@ func runSandbox() int {
 	}
 	if worktreeRoot != "" {
 		fmt.Printf("bwai: git worktrees persist on the host at %s\n", worktreeRoot)
+		if startedInWorktree {
+			if exposeMain {
+				fmt.Println("bwai: main checkout is exposed read-write.")
+			} else {
+				fmt.Println("bwai: main checkout is hidden (worktrees.expose_main=false).")
+			}
+		}
 	}
 	if broker != nil {
 		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
@@ -403,14 +434,15 @@ it unnecessary.
 
 // worktreeSectionTemplate is the ## Git worktrees section, rendered only
 // when bwai bound a persistent worktree root. {{worktree_root}} is
-// substituted with that host path.
+// substituted with that host path. {{writable_line}} states which paths
+// are writable, and differs when the session started in a linked
+// worktree (where the main checkout may or may not also be exposed).
 const worktreeSectionTemplate = `
 ## Git worktrees
 
-The only directory outside the project tree you can write to is
-` + "`{{worktree_root}}`" + `. It is bind-mounted from the host, so anything
-created there survives the sandbox; everything else outside the project
-tree lives on tmpfs and is gone when the session ends.
+{{writable_line}} Bind-mounted from the host,
+anything created there survives the sandbox; everything else outside the
+project tree lives on tmpfs and is gone when the session ends.
 
 Create worktrees there — with ` + "`wt`" + ` (which bwai already points at this
 directory through ` + "`WORKTRUNK_WORKTREE_PATH`" + `), or with plain git:
@@ -427,8 +459,20 @@ the destination under ` + "`{{worktree_root}}`" + ` explicitly.
 `
 
 // renderWorktreeSection fills the worktree section with the bound root.
-func renderWorktreeSection(root string) string {
-	return strings.ReplaceAll(worktreeSectionTemplate, "{{worktree_root}}", root)
+// mainTree, when non-empty, is the main checkout this worktree belongs
+// to; exposeMain says whether it is mounted read-write this session.
+func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
+	var line string
+	switch {
+	case mainTree == "":
+		line = "The only directory outside the project tree you can write to is `" + root + "`."
+	case exposeMain:
+		line = "The only directories outside the project tree you can write to are `" + root + "` and the main checkout at `" + mainTree + "`."
+	default:
+		line = "The only directory outside the project tree you can write to is `" + root + "`; the main checkout is not exposed (worktrees.expose_main=false)."
+	}
+	s := strings.ReplaceAll(worktreeSectionTemplate, "{{worktree_root}}", root)
+	return strings.ReplaceAll(s, "{{writable_line}}", line)
 }
 
 // installAgentMemoryFile writes the CLAUDE.md fragment into the broker
@@ -443,15 +487,16 @@ func renderWorktreeSection(root string) string {
 // models routinely skip). printRules is shared with `--list-rules`, so
 // the injected view and the on-demand view cannot drift apart.
 //
-// worktreeRoot, when non-empty, names the one bind-mounted host directory
+// worktreeRoot, when non-empty, names the bind-mounted host directory
 // where a worktree persists; it is rendered into the fragment so agents
-// don't create one on the ephemeral overlay and lose it. Empty means the
-// currentDir is not a main checkout, so there is nothing to name.
-func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot string) error {
+// don't create one on the ephemeral overlay and lose it. mainTree is
+// set only for sessions that started in a linked worktree ("" for main
+// checkouts) and selects the writable-paths wording via exposeMain.
+func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree string, exposeMain bool) error {
 	var b strings.Builder
 	b.WriteString(agentMemoryFileContent)
 	if worktreeRoot != "" {
-		b.WriteString(renderWorktreeSection(worktreeRoot))
+		b.WriteString(renderWorktreeSection(worktreeRoot, mainTree, exposeMain))
 	}
 	b.WriteString("\n## Broker rules for this sandbox\n\n")
 	b.WriteString("This is exactly what the broker will run, and what it will ask a\n")

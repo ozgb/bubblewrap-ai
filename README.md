@@ -190,9 +190,19 @@ A `.bwai.json` in the directory you run `bwai` from is layered on top of the bas
 
 ### Git worktrees
 
-Linked git worktrees (created by `worktrunk` or `git worktree add`) keep their real git dir inside the main repo, which the home sandbox hides. `bwai` detects this automatically — no config needed — and bind-mounts the shared git dir read-write at its real host path, so history, `git status`, commits, and branch ops all work inside the sandbox just like in an ordinary checkout. Only the git dir is exposed, not the rest of the main repo's working tree.
+Linked git worktrees (created by `worktrunk` or `git worktree add`) keep their real git dir inside the main repo, which the home sandbox hides. `bwai` detects this automatically — no config needed — and bind-mounts the shared git dir read-write at its real host path, so history, `git status`, commits, and branch ops all work inside the sandbox just like in an ordinary checkout.
 
 Creating a worktree *from inside* the sandbox is also covered. `worktrunk` defaults to a sibling of the repo, which without help would land on the sandbox's tmpfs home and vanish when the session ends. `bwai` pre-binds one dedicated host directory — `<parent>/.<repo>.worktrees` — and points `WORKTRUNK_WORKTREE_PATH` at it, so `wt` worktrees persist on the host. Only that root is exposed, not the repo's parent, so sibling checkouts stay hidden. Plain `git worktree add ../foo` does not follow the worktrunk setting and still lands on tmpfs.
+
+**Starting in a worktree** gets the same treatment: `bwai` follows the worktree's `.git` file back to the main checkout and binds the same `<parent>/.<repo>.worktrees` root, so every session of a repo — wherever it starts — shares one persistent worktree root. The main checkout's working tree is mounted read-write too, on by default; set `worktrees.expose_main` to `false` to keep it hidden:
+
+```json
+{
+  "worktrees": { "expose_main": false }
+}
+```
+
+With it off, worktrees still get the persistent root, the shared git dir, and full access to sibling `wt` worktrees — only the main checkout's files stay out of reach.
 
 ## Host-execution broker (experimental)
 

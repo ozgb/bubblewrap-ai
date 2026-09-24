@@ -188,12 +188,7 @@ func isWithin(parent, child string) bool {
 // Returns the bind args and the host root, or nil/"" when currentDir is not
 // a main git checkout.
 func worktreeRootMounts(currentDir string) ([]string, string, error) {
-	dotGit := filepath.Join(currentDir, ".git")
-	info, err := os.Lstat(dotGit)
-	if err != nil || !info.IsDir() {
-		return nil, "", nil
-	}
-	if _, err := os.Stat(filepath.Join(dotGit, "HEAD")); err != nil {
+	if !isMainCheckout(currentDir) {
 		return nil, "", nil
 	}
 	root := filepath.Join(filepath.Dir(currentDir), "."+filepath.Base(currentDir)+".worktrees")

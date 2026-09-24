@@ -244,6 +244,28 @@ func TestBroker_CwdInWorktreeRootAllowed(t *testing.T) {
 	}
 }
 
+// A worktree-start session with expose_main passes the main checkout as
+// an extra root; the broker must accept it as request cwd just like the
+// managed worktree root.
+func TestBroker_CwdInExposedMainTreeAllowed(t *testing.T) {
+	projectDir := t.TempDir() // the worktree this session started in
+	mainTree := filepath.Join(t.TempDir(), "main")
+	if err := os.MkdirAll(mainTree, 0o755); err != nil {
+		t.Fatalf("mkdir main tree: %v", err)
+	}
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules:   []Rule{{Match: []string{"echo", "x"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir, mainTree)
+	frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"echo", "x"}, Cwd: mainTree,
+	})
+	if len(frames) < 2 || frames[len(frames)-1].Type != frameTypeExit {
+		t.Fatalf("expected exec to succeed from main-tree cwd, got %+v", frames)
+	}
+}
+
 func TestBroker_ConfirmApproved(t *testing.T) {
 	projectDir := t.TempDir()
 	cfg := BrokerConfig{
