@@ -50,6 +50,11 @@ func homeMounts(home string) []string {
 			continue
 		}
 		p := filepath.Join(home, name)
+		// Stat follows symlinks: bwrap resolves bind sources on the host,
+		// so a dangling link (e.g. ~/.steampath) would abort the launch.
+		if _, err := os.Stat(p); err != nil {
+			continue
+		}
 		if matchesDirect(homeAllow, name) {
 			args = append(args, rwBind(p)...)
 		} else {

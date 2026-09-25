@@ -128,6 +128,16 @@ func TestHomeMounts(t *testing.T) {
 	secretDir := mkDir(".config/secret")  // blocked sub-path dir: --tmpfs (before allowed)
 	secretFile := mkFile(".config/token") // blocked sub-path file: masked by caller, not --tmpfs
 
+	dangling := filepath.Join(home, ".dangling")
+	if err := os.Symlink(filepath.Join(home, ".missing-target"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	liveTarget := mkFile(".live-target")
+	liveLink := filepath.Join(home, ".live-link")
+	if err := os.Symlink(liveTarget, liveLink); err != nil {
+		t.Fatal(err)
+	}
+
 	args := homeMounts(home)
 
 	t.Run("allowed dotdir is rw-bound", func(t *testing.T) {
@@ -184,6 +194,20 @@ func TestHomeMounts(t *testing.T) {
 		}
 		if iBlocked > iAllowed {
 			t.Errorf("--tmpfs for blocked sub-path (idx %d) must come before --bind for allowed sub-path (idx %d)", iBlocked, iAllowed)
+		}
+	})
+
+	t.Run("dangling dotfile symlink is skipped", func(t *testing.T) {
+		for _, a := range args {
+			if a == dangling {
+				t.Errorf("dangling symlink %q must not appear in args (bwrap cannot bind a missing target); args: %v", dangling, args)
+			}
+		}
+	})
+
+	t.Run("live dotfile symlink is ro-bound", func(t *testing.T) {
+		if !containsSequence(args, "--ro-bind", liveLink, liveLink) {
+			t.Errorf("expected --ro-bind for live symlink %q; args: %v", liveLink, args)
 		}
 	})
 }
