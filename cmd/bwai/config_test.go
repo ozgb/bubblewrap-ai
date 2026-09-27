@@ -59,6 +59,18 @@ func TestDefaultConfigSupportsCommandCode(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigSupportsCodex(t *testing.T) {
+	cfg := defaultConfig()
+	if !containsSequence(cfg.HomeAllow, ".codex") {
+		t.Errorf("home_allow = %v, want it to include .codex", cfg.HomeAllow)
+	}
+	for _, key := range []string{"OPENAI_API_KEY", "CODEX_HOME"} {
+		if !containsSequence(cfg.EnvAllow, key) {
+			t.Errorf("env_allow = %v, want it to include %s", cfg.EnvAllow, key)
+		}
+	}
+}
+
 // TestDefaultConfigIncludesGoBin pins that ~/go/bin — where `go install`
 // drops binaries — is exposed. It lives outside a dotdir, so unlike
 // ~/.cargo it is not even read-only mounted unless named explicitly.

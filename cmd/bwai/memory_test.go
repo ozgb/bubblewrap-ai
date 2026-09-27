@@ -42,6 +42,59 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 	if strings.Contains(s, "{{worktree_root}}") {
 		t.Errorf("CLAUDE.md still contains an unrendered placeholder:\n%s", s)
 	}
+	codex, err := os.ReadFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(codex) != s {
+		t.Errorf("Codex broker guidance differs from shared agent guidance")
+	}
+}
+
+func TestCodexHomePath(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	if got := codexHomePath(home, project, defaultConfig()); got != filepath.Join(home, ".codex") {
+		t.Errorf("default codex home = %q, want %q", got, filepath.Join(home, ".codex"))
+	}
+	cfg := defaultConfig()
+	cfg.EnvSet["CODEX_HOME"] = "~/.local/share/bwai/codex"
+	want := filepath.Join(home, ".local/share/bwai/codex")
+	if got := codexHomePath(home, project, cfg); got != want {
+		t.Errorf("configured codex home = %q, want %q", got, want)
+	}
+	cfg = defaultConfig()
+	cfg.EnvSet["CODEX_HOME"] = "codex-state"
+	if got, want := codexHomePath(home, project, cfg), filepath.Join(project, "codex-state"); got != want {
+		t.Errorf("relative codex home = %q, want %q", got, want)
+	}
+}
+
+func TestCodexHomeWritable(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(root, "project")
+	state := filepath.Join(root, "state")
+	for _, dir := range []string{home, project, state, filepath.Join(home, ".codex")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := defaultConfig()
+	cfg.HomeAllow = nil
+	if codexHomeWritable(filepath.Join(home, ".codex"), home, project, state, cfg) {
+		t.Fatal("read-only CODEX_HOME should not be treated as writable")
+	}
+	cfg.HomeAllow = []string{".codex"}
+	if !codexHomeWritable(filepath.Join(home, ".codex"), home, project, state, cfg) {
+		t.Fatal("allowed CODEX_HOME should be writable")
+	}
+	if !codexHomeWritable(filepath.Join(state, "codex"), home, project, state, cfg) {
+		t.Fatal("CODEX_HOME under state_root should be writable")
+	}
+	if !codexHomeWritable(filepath.Join(project, "codex"), home, project, state, cfg) {
+		t.Fatal("CODEX_HOME under project should be writable")
+	}
 }
 
 // Without a bound worktree root there is nothing to name; the section must

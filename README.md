@@ -1,6 +1,6 @@
 # bubblewrap-ai
 
-Runs AI coding agents (Claude, Gemini, Goose, opencode, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
+Runs AI coding agents (Codex, Claude, Gemini, Goose, opencode, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
 
 ## Requirements
 
@@ -44,6 +44,7 @@ By default, `bwai` opens a sandboxed `bash` shell. From there you can launch any
 
 ```sh
 [🫧] > claude
+[🫧] > codex
 [🫧] > goose
 [🫧] > gemini
 [🫧] > opencode
@@ -100,6 +101,7 @@ Example `~/.config/bwai/bwai.json`:
   "bwrap_extra_args": ["--unshare-pid", "--unshare-ipc"],
   "command": ["bash"],
   "home_allow": [
+    ".codex",
     ".claude",
     ".gemini",
     ".claude.json",
@@ -161,6 +163,7 @@ Example `~/.config/bwai/bwai.json`:
     "GOOSE_PLANNER_MODEL",
     "OPENAI_API_KEY",
     "OPENAI_API_BASE",
+    "CODEX_HOME",
     "OPENROUTER_API_KEY",
     "COMMAND_CODE_API_KEY",
     "COMMANDCODE_API_URL",
@@ -227,6 +230,20 @@ Set `state_root` to move the whole thing elsewhere, or to `""` to disable it:
 ```
 
 `env_set` covers any variable the built-in bundle doesn't, and `path_prepend` adds directories ahead of `<state_root>/bin`. A leading `~` in `state_root`, `env_set` values, and `path_prepend` is expanded by bwai; bwrap expands neither `~` nor `$VAR`.
+
+### Codex CLI
+
+Launch Codex with `bwai --command codex`, or set `"command": ["codex"]` in the bwai config. Codex CLI can authenticate with an `OPENAI_API_KEY` (already passed through by the default environment allowlist), or with credentials stored by its login flow. For saved login, the default config exposes `~/.codex` read-write inside the sandbox. This includes Codex's local configuration, credentials, and session state, so only use it if you are comfortable making those files available to the agent. If your existing config has an explicit `home_allow` list that excludes `.codex`, add `.codex` to it for saved login and broker guidance; otherwise use API-key authentication.
+
+Codex normally uses `~/.codex` as its home. To keep its files in bwai's persistent state area instead, set `CODEX_HOME` to a path under `state_root`, for example:
+
+```json
+{
+  "env_set": { "CODEX_HOME": "~/.local/share/bwai/codex" }
+}
+```
+
+When the broker is enabled, bwai overlays its generated broker guidance as `AGENTS.md` inside `CODEX_HOME` (or `~/.codex` when unset). Codex loads that as global instructions; the overlay does not change the host's Codex files or the project's own `AGENTS.md`. A custom `CODEX_HOME` must be inside the project, your home directory, or `state_root` so it exists within the sandbox. If that location is read-only under your config, bwai leaves it unchanged and reports that broker guidance was not mounted.
 
 ### Git worktrees
 
@@ -360,7 +377,7 @@ Treat `confirm` as the last resort rather than the cautious default. Every confi
 
 ### Telling the agent it can call `bwai-outside`
 
-The sandbox is a fresh world — an agent like Claude has no way to discover `bwai-outside` on its own. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Each agent opts in with a flag (except opencode, which is injected via a config env var); `bwai` never writes to the agent's own config or memory files.
+The sandbox is a fresh world — agents need a way to discover `bwai-outside`. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Claude Code and Command Code opt in with a flag or mod, opencode uses a config environment variable, and Codex loads an isolated overlay at `~/.codex/AGENTS.md`; `bwai` does not modify the host's agent configuration.
 
 **Command Code** reads system-prompt extensions from mods, so `bwai` exposes a tiny mod at `/run/bwai/bwai.ts` that appends the fragment. Start it with:
 

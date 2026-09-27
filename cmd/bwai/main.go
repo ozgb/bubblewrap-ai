@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -214,6 +215,9 @@ func runSandbox() int {
 	}
 	if broker != nil {
 		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
+		if !codexHomeWritable(codexHomePath(home, currentDir, cfg), home, currentDir, stateRoot, cfg) {
+			fmt.Println("bwai: Codex broker guidance not mounted because CODEX_HOME is read-only; add it to home_allow or place it under the project/state_root.")
+		}
 		if url := broker.WebURL(); url != "" {
 			fmt.Printf("bwai: web approval enabled on %s — per-request links arrive via desktop notification.\n", url)
 		}
@@ -309,6 +313,17 @@ func runSandbox() int {
 			"--setenv", "OPENCODE_CONFIG", "/run/bwai/opencode.json",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
 		)
+		// Codex automatically loads AGENTS.md from CODEX_HOME. Overlay the
+		// generated broker guidance there rather than replacing the project's
+		// AGENTS.md or Codex's built-in instructions. Create the directory in
+		// the sandbox when the host has no ~/.codex yet.
+		codexHome := codexHomePath(home, currentDir, cfg)
+		if codexHomeWritable(codexHome, home, currentDir, stateRoot, cfg) {
+			args = append(args, missingBwrapDirs(codexHome)...)
+			args = append(args,
+				"--ro-bind", filepath.Join(broker.TmpDir(), "CODEX_AGENTS.md"), filepath.Join(codexHome, "AGENTS.md"),
+			)
+		}
 	}
 	// PATH: user prepends, then the state root's bin, then the broker's
 	// helper dir — which must beat a stale host git-safe, so it precedes the
@@ -383,6 +398,66 @@ func runSandbox() int {
 		return 1
 	}
 	return 0
+}
+
+// codexHomePath resolves the directory Codex will use in the sandbox. A
+// CODEX_HOME from env_set takes precedence, followed by an explicitly
+// allowed host value, then Codex's default under HOME.
+func codexHomePath(home, currentDir string, cfg Config) string {
+	value := cfg.EnvSet["CODEX_HOME"]
+	if value == "" && slices.Contains(cfg.EnvAllow, "CODEX_HOME") {
+		value = os.Getenv("CODEX_HOME")
+	}
+	if value == "" {
+		return filepath.Join(home, ".codex")
+	}
+	value = expandHome(value, home)
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(currentDir, value)
+	}
+	return filepath.Clean(value)
+}
+
+// codexHomeWritable reports whether the sandbox already has a writable
+// mount covering CODEX_HOME, or the directory will be created on its
+// writable home overlay. Respect an explicit home_allow restriction rather
+// than making a previously read-only Codex directory writable for the broker.
+func codexHomeWritable(codexHome, home, currentDir, stateRoot string, cfg Config) bool {
+	_, statErr := os.Stat(codexHome)
+	missing := os.IsNotExist(statErr)
+	if isWithin(currentDir, codexHome) || (stateRoot != "" && isWithin(stateRoot, codexHome)) {
+		return true
+	}
+	if !isWithin(home, codexHome) {
+		return false
+	}
+	rel, err := filepath.Rel(home, codexHome)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	root := strings.Split(rel, string(os.PathSeparator))[0]
+	return missing || matchesDirect(cfg.HomeAllow, root)
+}
+
+// missingBwrapDirs returns --dir arguments for missing path components,
+// ordered from the shallowest missing parent to the requested directory.
+func missingBwrapDirs(path string) []string {
+	var missing []string
+	for p := filepath.Clean(path); ; p = filepath.Dir(p) {
+		if _, err := os.Stat(p); err == nil {
+			break
+		}
+		missing = append(missing, p)
+		parent := filepath.Dir(p)
+		if parent == p {
+			break
+		}
+	}
+	args := make([]string, 0, len(missing)*2)
+	for i := len(missing) - 1; i >= 0; i-- {
+		args = append(args, "--dir", missing[i])
+	}
+	return args
 }
 
 // stateRootEnv points each tool's cache or config home at a subdirectory of
@@ -632,10 +707,11 @@ func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
 	return strings.ReplaceAll(s, "{{writable_line}}", line)
 }
 
-// installAgentMemoryFile writes the CLAUDE.md fragment into the broker
+// installAgentMemoryFile writes the agent guidance into the broker
 // tmpdir. It's bind-mounted into the sandbox at /run/bwai/CLAUDE.md,
 // where Claude Code picks it up via `--add-dir /run/bwai`, and where the
-// command-code mod below reads it.
+// command-code mod below reads it. A copy is installed as ~/.codex/AGENTS.md
+// inside the sandbox so Codex loads it as global instructions.
 //
 // The live rule set is rendered into the fragment so every agent that
 // loads it knows what the broker will and won't run before its first
@@ -662,7 +738,11 @@ func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree 
 	b.WriteString("```\n")
 	printRules(&b, rules)
 	b.WriteString("```\n")
-	return os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), []byte(b.String()), 0o644)
+	content := []byte(b.String())
+	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), content, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644)
 }
 
 // bwaiModContent is a command-code mod (loaded with `cmd --mod`) whose

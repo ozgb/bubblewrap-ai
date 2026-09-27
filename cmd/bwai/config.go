@@ -127,6 +127,8 @@ func defaultConfig() Config {
 			// OpenAI-compatible providers (used by Goose and others)
 			"OPENAI_API_KEY",
 			"OPENAI_API_BASE",
+			// Codex CLI state directory override
+			"CODEX_HOME",
 			// OpenRouter
 			"OPENROUTER_API_KEY",
 			// Command Code
@@ -135,6 +137,7 @@ func defaultConfig() Config {
 			"CMD_LOCAL_ONLY",
 		},
 		HomeAllow: []string{
+			".codex", // Codex CLI config, login state, and sessions
 			".claude",
 			".gemini",
 			".claude.json",
