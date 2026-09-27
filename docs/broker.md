@@ -357,7 +357,7 @@ guarantee. So the commands that need a real judgement call live behind a
 literal argv:
 
 ```json
-{ "match": ["git-safe", "push"],         "action": "auto_allow" },
+{ "match": ["git-safe", "push", "**"],   "action": "auto_allow" },
 { "match": ["git-safe", "commit", "**"], "action": "auto_allow" },
 { "match": ["git-safe", "**"],           "action": "auto_deny" }
 ```
@@ -378,16 +378,31 @@ inside the sandbox would be advisory only. The rules still match the
 original argv, so the host-side mapping can never name a command the rules
 did not authorize.
 
-`git-safe push` is closed over its arguments — no flags, no refspecs, no
-remote — and enforces the policy in code:
+`git-safe push` is closed over its arguments — no flags, no refspecs, at
+most one remote name — and enforces the policy in code:
 
 - refuses a detached HEAD;
-- refuses the protected branches (`main`, `master`, `trunk`, `develop`);
-- pushes only the current branch, and only to `origin`;
+- refuses the protected branches — the built-in `main`, `master`, `trunk`,
+  `develop` plus any patterns in `broker.protected_branches` (exact names or
+  shell globs such as `release-*`, `release/*`);
+- pushes only the current branch;
+- authorizes the **push URL** of the chosen remote against
+  `broker.push_allowed_urls` (default remote `origin`), because the sandbox
+  owns `.git/config` and can retarget any remote — the remote name is not a
+  boundary;
 - fetches the remote tip and requires it to be an **ancestor of HEAD**
   before pushing, so a non-fast-forward update cannot happen;
 - constructs the refspec itself (`HEAD:refs/heads/<branch>`, no `+`
   prefix, never `--force`), creating the remote branch on first push.
+
+The allowlist and the protected-branch list are trust anchors, not ordinary
+settings: the broker snapshots both at session start and injects them into
+the host-side push (as `BWAI_PUSH_ALLOWED` and `BWAI_PROTECTED_BRANCHES`), so
+a mid-session edit to the project tree — including the `.bwai.json` they may
+have been read from — cannot widen them. An empty URL list allows no push;
+the built-in protected branches are always in force. URL entries are
+normalised before comparison, so `git@github.com:o/r.git` and
+`https://github.com/o/r` are the same entry.
 
 The ancestry check is the part a deny-list cannot express: it makes a
 destructive push impossible by construction — a property of the commit
@@ -406,9 +421,10 @@ repeatable for extra paragraphs, and adds `-S` itself:
 - refuses a pathspec, so only what was staged can be committed;
 - refuses a detached HEAD, for the same reason push does.
 
-Because the message is an argument, this rule carries a trailing `**`
-where `push` does not. That is the one loose spot in the pattern, and the
-wrapper is what keeps it meaningful: the tail can only ever be `-m` pairs.
+Because the message is an argument, this rule carries a trailing `**`, as
+`push` does for its optional remote name. That is the one loose spot in the
+pattern, and the wrapper is what keeps it meaningful: the tail can only ever
+be `-m` pairs for `commit`, and at most a bare remote name for `push`.
 
 The rules above are `auto_allow`, and that is the point of the exercise.
 `confirm` is a last resort, not a safe default: it is what you reach for

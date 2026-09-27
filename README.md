@@ -351,20 +351,34 @@ Some commands are too dangerous to expose under their own name. `git push` is th
 The answer is a wrapper with a closed argument surface. `git-safe` is built from the same binary as `bwai` — bwai binds that one copy into the sandbox twice, so it appears beside `bwai-outside` under `/run/bwai/bin`. Nothing is installed on the host. It exposes two operations, and both are called directly, with no `bwai-outside` prefix:
 
 ```sh
-git-safe push
+git-safe push            # current branch to origin
+git-safe push backup     # current branch to the `backup` remote
 git-safe commit -m "fix bug"
 ```
 
 In the sandbox `git-safe` is only a client: it forwards `["git-safe", …]` to the broker and decides nothing itself. The policy runs on the host, as the `bwai git-safe` subcommand the broker resolves the request to. That split is load-bearing — the agent can reach anything the sandbox can reach, so a check performed inside the sandbox would be advisory only.
 
-`git-safe push` pushes the current branch to `origin` and refuses everything else: no flags, no refspecs, no other remote, no detached HEAD, no protected branch (`main`/`master`/`trunk`/`develop`), and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push.
+`git-safe push` pushes the current branch and refuses everything else: no flags, no refspecs, no detached HEAD, no protected branch, and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push. It takes an optional remote name (default `origin`), but the name proves nothing: the sandbox owns `.git/config` and can retarget any remote, so the *push URL* is what gets authorised against `broker.push_allowed_urls`. The broker snapshots that list at startup and injects it into the host-side push, so editing the project tree — including the `.bwai.json` it may have been read from — cannot widen it mid-session. An empty list allows no push.
+
+The protected set is the built-in `main`/`master`/`trunk`/`develop` plus any patterns in `broker.protected_branches`. A pattern is an exact branch name or a shell glob (`release-*`, `release/*`), and because the refspec is always `HEAD:refs/heads/<branch>`, protecting the branch you are on protects the destination branch on every remote.
+
+```json
+{
+  "broker": {
+    "push_allowed_urls": ["git@github.com:CubeB/RWE-B4.git"],
+    "protected_branches": ["release-*"]
+  }
+}
+```
+
+Entries are remote URLs and branch patterns, and both sides are normalised before comparison, so `git@github.com:CubeB/RWE-B4.git` and `https://github.com/CubeB/RWE-B4` are the same URL entry.
 
 `git-safe commit` commits what is staged, GPG-signed. The signing key lives in the host's `~/.gnupg`, which the sandbox hides — that is the reason to route a commit through the host at all. It accepts only `-m <message>` (repeat for extra paragraphs) and adds `-S` itself, so signing is not the caller's choice; every other spelling is refused — `--amend`, `-a`/`--all`, `--no-verify`, `--author`, `-F`, and bare pathspecs. The agent cannot rewrite history or skip a hook, and the broker rule never has to describe those flags. It also refuses a detached HEAD, for the same reason `push` does.
 
 That reduces the broker rules to:
 
 ```json
-{ "match": ["git-safe", "push"],         "action": "auto_allow" },
+{ "match": ["git-safe", "push", "**"],   "action": "auto_allow" },
 { "match": ["git-safe", "commit", "**"], "action": "auto_allow" },
 { "match": ["git-safe", "**"],           "action": "auto_deny" }
 ```
@@ -373,7 +387,7 @@ Note the action: **`auto_allow`, not `confirm`.** That is the payoff of moving t
 
 Treat `confirm` as the last resort rather than the cautious default. Every confirm rule stalls an unattended session on a human who may be asleep, so each one is a standing bug report on the rule set: it marks a judgement nobody has moved into code yet. Write the wrapper, then write `auto_allow`. The agent is told the same thing in its injected context — hunt the rule list for an `AUTO_ALLOW` path before issuing a command that lands on a `confirm`.
 
-`commit` needs a trailing `**` because the message is an argument — unlike `push`, it can't be a two-token rule — but the wrapper is what makes the tail safe: it accepts only `-m` pairs, so the pattern never has to enumerate the bad flags.
+Both `push` and `commit` need a trailing `**` because both carry arguments — the remote name and the message respectively — but the wrapper is what makes the tail safe: `push` accepts at most a bare remote name and `commit` accepts only `-m` pairs, so neither pattern ever has to enumerate the bad flags.
 
 ### Telling the agent it can call `bwai-outside`
 

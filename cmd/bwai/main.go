@@ -596,12 +596,15 @@ no ` + "`bwai-outside`" + ` prefix:
 
 ` + "```sh" + `
 git-safe commit -m "fix bug"  # commits what is staged, GPG-signed
-git-safe push                 # publishes the current branch (fast-forward only)
+git-safe push [<remote>]      # publishes the current branch (fast-forward only)
 ` + "```" + `
 
 ` + "`bwai-outside git push`" + ` is deliberately not allowed. ` + "`git-safe push`" + `
-pushes the current branch to ` + "`origin`" + ` and refuses force, the protected
-branches (main/master/trunk/develop), and any non-fast-forward update.
+pushes the current branch to the given remote (default ` + "`origin`" + `) and refuses
+force, the protected branches (main/master/trunk/develop plus patterns from
+` + "`broker.protected_branches`" + `), and any non-fast-forward update. The remote's
+push URL must be listed in ` + "`broker.push_allowed_urls`" + `; an empty list allows
+no push.
 
 ` + "`git-safe commit`" + ` is the signing path: it takes only ` + "`-m <message>`" + `
 (repeat it for extra paragraphs), always signs, and refuses every other

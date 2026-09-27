@@ -498,6 +498,16 @@ func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx in
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = req.Cwd
 	cmd.Env = os.Environ() // host env, not sandbox env
+	// Hand the git-safe push its allowlist as a snapshot from this broker's
+	// in-memory config. It is set unconditionally (empty included) so a
+	// stray host environment value can never widen it, and so the only
+	// source inside the sandbox is the value captured at session start.
+	if len(req.Argv) > 0 && req.Argv[0] == "git-safe" {
+		cmd.Env = append(cmd.Env,
+			pushAllowedEnv+"="+strings.Join(b.cfg.PushAllowedURLs, "\n"),
+			protectedBranchesEnv+"="+strings.Join(b.cfg.ProtectedBranches, "\n"),
+		)
+	}
 
 	// Acquire pipes before Start; Wait closes them so readers must
 	// drain to EOF before Wait returns.
