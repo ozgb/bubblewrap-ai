@@ -192,7 +192,7 @@ For sub-paths (entries containing a `/`), `home_allow` is applied after `home_bl
 
 ### Project-local config
 
-A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended) and `env_set` (a map, merged per key) — are added to the base, so a project only names what it adds. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags). A missing local file is ignored.
+A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended), `env_set` (a map, merged per key), and `broker.rules` (appended, base first) — are added to the base, so a project only names what it adds. Because rule matching is first-match, base rules keep precedence and a project's rules extend the set rather than shadowing it. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags) and the trust-anchor lists `broker.push_allowed_urls` and `broker.protected_branches` (a project may narrow them). A missing local file is ignored.
 
 ```json
 {

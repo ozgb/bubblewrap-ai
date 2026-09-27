@@ -240,9 +240,10 @@ func loadLayeredConfig(basePath, localPath string) (Config, error) {
 // the file existed. Decoding onto the existing value (rather than a fresh
 // struct) is deliberate: omitted nested fields such as broker.web.addr keep
 // their defaults. When merge is true, set-like list fields present in the
-// file are appended to cfg's instead of replacing them; argv lists such as
-// bwrap_extra_args are left to replace, because appending them would reorder
-// or duplicate flags.
+// file are appended to cfg's instead of replacing them, including
+// broker.rules (base first, so the base keeps first-match precedence); argv
+// lists such as bwrap_extra_args are left to replace, because appending them
+// would reorder or duplicate flags.
 func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -259,11 +260,13 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 	// slice's backing array, so appending afterwards would otherwise see the
 	// local values already in place.
 	var prevAllow, prevBlock, prevEnv, prevPath []string
+	var prevRules []Rule
 	if merge {
 		prevAllow = append([]string(nil), cfg.HomeAllow...)
 		prevBlock = append([]string(nil), cfg.HomeBlock...)
 		prevEnv = append([]string(nil), cfg.EnvAllow...)
 		prevPath = append([]string(nil), cfg.PathPrepend...)
+		prevRules = cloneRules(cfg.Broker.Rules)
 	}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return false, fmt.Errorf("%s: %w", path, err)
@@ -281,14 +284,51 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 		if _, ok := keys["path_prepend"]; ok {
 			cfg.PathPrepend = appendStrings(prevPath, cfg.PathPrepend)
 		}
+		// broker.rules merges like the other lists, base first. Matching is
+		// first-match, so the base rules keep precedence and a project adds
+		// to the set rather than replacing it.
+		if brokerKeyPresent(keys, "rules") {
+			cfg.Broker.Rules = append(prevRules, cfg.Broker.Rules...)
+		}
 	}
 	return true, nil
+}
+
+// brokerKeyPresent reports whether the top-level "broker" object names key.
+// Used to tell "local omitted the field" from "local set it", which decides
+// whether a merge appends the base instead of silently duplicating it.
+func brokerKeyPresent(top map[string]json.RawMessage, key string) bool {
+	raw, ok := top["broker"]
+	if !ok {
+		return false
+	}
+	var broker map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &broker); err != nil {
+		return false
+	}
+	_, ok = broker[key]
+	return ok
 }
 
 func appendStrings(base, add []string) []string {
 	out := make([]string, 0, len(base)+len(add))
 	out = append(out, base...)
 	return append(out, add...)
+}
+
+// cloneRules deep-copies a rule list, including each Match slice. A shallow
+// copy is not enough: json.Unmarshal reuses the backing arrays of existing
+// slices, so decoding the local rules would overwrite the base rules' Match
+// tokens through the shared array.
+func cloneRules(rules []Rule) []Rule {
+	out := make([]Rule, len(rules))
+	for i, r := range rules {
+		out[i] = Rule{
+			Match:  append([]string(nil), r.Match...),
+			Action: r.Action,
+		}
+	}
+	return out
 }
 
 func validateConfig(cfg *Config) error {

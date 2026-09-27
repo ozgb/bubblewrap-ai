@@ -166,6 +166,45 @@ func TestLoadLayeredConfigMergesPathPrepend(t *testing.T) {
 	}
 }
 
+// TestLoadLayeredConfigMergesBrokerRules pins that broker.rules from the
+// project-local config extend the base rules rather than replacing them, and
+// that omitting the field locally does not duplicate the base.
+func TestLoadLayeredConfigMergesBrokerRules(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	local := filepath.Join(dir, "local.json")
+	writeFile(t, base, `{"broker":{"rules":[`+
+		`{"match":["gh","pr","**"],"action":"auto_allow"},`+
+		`{"match":["git","push","--force","**"],"action":"auto_deny"}]}}`)
+	writeFile(t, local, `{"broker":{"rules":[`+
+		`{"match":["gh","pr","-R","o/r","**"],"action":"auto_allow"}]}}`)
+
+	baseRules := []Rule{
+		{Match: []string{"gh", "pr", "**"}, Action: ActionAutoAllow},
+		{Match: []string{"git", "push", "--force", "**"}, Action: ActionAutoDeny},
+	}
+	want := append(append([]Rule(nil), baseRules...),
+		Rule{Match: []string{"gh", "pr", "-R", "o/r", "**"}, Action: ActionAutoAllow})
+
+	cfg, err := loadLayeredConfig(base, local)
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Broker.Rules, want) {
+		t.Fatalf("rules = %+v, want base rules then the local rule", cfg.Broker.Rules)
+	}
+
+	// A local file that omits rules must not duplicate the base.
+	writeFile(t, local, `{"broker":{"approval_timeout_s":7}}`)
+	cfg, err = loadLayeredConfig(base, local)
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Broker.Rules, baseRules) {
+		t.Fatalf("rules = %+v, want the base rules untouched", cfg.Broker.Rules)
+	}
+}
+
 func TestDefaultStateRoot(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "")
 	if got, want := defaultStateRoot("/home/u"), "/home/u/.local/share/bwai"; got != want {
