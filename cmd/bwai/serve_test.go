@@ -115,6 +115,12 @@ func TestNewServeBroker(t *testing.T) {
 		t.Errorf("ran in %q, want %q", strings.TrimSpace(out), want)
 	}
 
+	frames = sendRequest(t, sock, brokerRequest{V: 1, Op: opContext})
+	if len(frames) != 1 || !strings.Contains(frames[0].Data, "dedicated Unix user") ||
+		strings.Contains(frames[0].Data, "inside a bwai sandbox") {
+		t.Errorf("daemon context should describe a separate user, not a sandbox: %+v", frames)
+	}
+
 	frames = sendRequest(t, sock, brokerRequest{V: 1, Argv: []string{"pwd"}, Cwd: t.TempDir()})
 	if len(frames) != 1 || frames[0].Type != frameTypeDenied {
 		t.Errorf("cwd outside roots: frames = %+v, want a denial", frames)

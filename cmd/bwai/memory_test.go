@@ -21,7 +21,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(got)
-	if !strings.HasPrefix(s, agentMemoryFileContent) {
+	if !strings.HasPrefix(s, strings.Replace(agentMemoryFileContent, "{{intro}}", sandboxIntro, 1)) {
 		t.Errorf("CLAUDE.md should open with the bwai fragment:\n%s", s)
 	}
 	// The rules ride along in the fragment so the agent knows them before
@@ -30,7 +30,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 	// "auto_allow" (lowercase) is the convention note, not the rendered
 	// table — printRules upper-cases the action — so it pins the prose.
 	for _, want := range []string{
-		"Broker rules for this sandbox", "CONFIRM", "git-safe push", "gh pr create **",
+		"## Broker rules", "inside a bwai sandbox", "CONFIRM", "git-safe push", "gh pr create **",
 		"auto_allow", "closed wrapper",
 		// The worktree section must name the bound root, not the template.
 		"Git worktrees", "/home/u/proj/.proj.worktrees",
@@ -39,7 +39,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 			t.Errorf("CLAUDE.md missing %q:\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "{{worktree_root}}") {
+	if strings.Contains(s, "{{worktree_root}}") || strings.Contains(s, "{{intro}}") {
 		t.Errorf("CLAUDE.md still contains an unrendered placeholder:\n%s", s)
 	}
 	codex, err := os.ReadFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"))

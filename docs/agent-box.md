@@ -113,12 +113,12 @@ for public repositories a classic PAT with only `public_repo`.
 
 `ssh agent@box` gets the agent a real login session (the setup copies
 your `authorized_keys`), which `toolbox create` / `toolbox enter` need.
-Inside, `bwai-outside --context` prints the guidance and live rules; put
-it wherever the agent reads instructions from, e.g.
-
-```sh
-bwai-outside --context > ~/.config/opencode/AGENTS.md
-```
+Every new shell runs `bwai-refresh-context`, which writes the broker's
+guidance and live rules (`bwai-outside --context`) to the agents' global
+instructions: `~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md` and
+`~/.codex/AGENTS.md`. A rule change on the box reaches the agents at
+their next login, with nothing to remember. A file that has other
+content is left alone with a warning, so add the context to it yourself.
 
 Work under `~/work`. The broker refuses requests from anywhere else, and
 it compares paths as the host sees them, so the work tree has to be at

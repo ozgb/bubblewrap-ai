@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Writes the broker's agent guidance and live rules into each agent's
+# global instructions file. Run at login (from ~/.bashrc.d/bwai.sh) so a
+# rule change on the box reaches the agents without anyone remembering to.
+#
+# Only files that are missing or already begin with the guidance's
+# heading are written, so instructions the agent user wrote by hand are
+# left alone.
+set -u
+
+ctx=$(timeout 5 bwai-outside --context 2>/dev/null) || exit 0
+[[ $ctx == "# bwai broker"* ]] || exit 0
+
+for f in \
+	"$HOME/.config/opencode/AGENTS.md" \
+	"$HOME/.claude/CLAUDE.md" \
+	"$HOME/.codex/AGENTS.md"; do
+	if [[ -e $f ]] && [[ $(head -n1 "$f") != "# bwai broker" ]]; then
+		echo "bwai: not refreshing $f: it has other content; add the output of \`bwai-outside --context\` yourself" >&2
+		continue
+	fi
+	mkdir -p "$(dirname "$f")"
+	tmp=$(mktemp "$f.XXXXXX") && printf '%s\n' "$ctx" >"$tmp" && mv -f "$tmp" "$f"
+done

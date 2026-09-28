@@ -57,7 +57,10 @@ deploy-box: test build
 	scp -q $(BIN_DIR)/$(BINARY) $(BROKER_USER)@$(BOX):.local/bin/$(BINARY).new
 	ssh $(BROKER_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY) && systemctl --user restart bwai-broker && systemctl --user is-active bwai-broker'
 	scp -q $(BIN_DIR)/$(BINARY) $(AGENT_USER)@$(BOX):.local/bin/$(BINARY).new
-	ssh $(AGENT_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY)'
+	scp -q scripts/agent-box/bwai-refresh-context $(AGENT_USER)@$(BOX):.local/libexec/bwai/bwai-refresh-context
+	ssh $(AGENT_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY) && \
+		{ grep -q bwai-refresh-context ~/.bashrc.d/bwai.sh || echo bwai-refresh-context >> ~/.bashrc.d/bwai.sh; } && \
+		PATH=~/.local/libexec/bwai:$$PATH BWAI_BROKER_SOCKET=~/.bwai/broker.sock bwai-refresh-context'
 	@echo "local:  $(VERSION)"
 	@printf 'broker: '; ssh $(BROKER_USER)@$(BOX) '~/.local/bin/$(BINARY) --version'
 	@printf 'agent:  '; ssh $(AGENT_USER)@$(BOX) '~/.local/bin/$(BINARY) --version'

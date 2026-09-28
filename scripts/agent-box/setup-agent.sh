@@ -16,11 +16,14 @@ mkdir -p "$LIBEXEC"
 for p in bwai-outside git-safe bwai-gpg; do
 	ln -sf "$HOME/.local/bin/bwai" "$LIBEXEC/$p"
 done
+install -m 0755 "$(dirname "$0")/bwai-refresh-context" "$LIBEXEC/bwai-refresh-context"
 
 mkdir -p "$HOME/.bashrc.d"
 cat >"$HOME/.bashrc.d/bwai.sh" <<EOF
 export BWAI_BROKER_SOCKET=$SOCK
 case ":\$PATH:" in *":$LIBEXEC:"*) ;; *) PATH=$LIBEXEC:\$PATH ;; esac
+# Keep the agents' instructions in step with the broker's live rules.
+bwai-refresh-context
 EOF
 
 # Commits are signed on the host by the broker; git only needs to hand the
@@ -29,4 +32,4 @@ git config --global gpg.program "$LIBEXEC/bwai-gpg"
 git config --global commit.gpgsign true
 git config --global user.signingkey host
 
-echo "installed; open a new shell, then: bwai-outside --context"
+echo "installed; each new shell refreshes the agents' instructions from the broker"

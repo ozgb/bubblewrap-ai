@@ -152,6 +152,7 @@ type Broker struct {
 	// of every broker.sock connection.
 	allowedUIDs   []int
 	confirmWindow time.Duration
+	daemon        bool
 	mu            sync.Mutex
 	pending       map[string]*pendingRequest
 	notifByID     map[uint32]*pendingRequest // D-Bus notification id → request
@@ -174,6 +175,9 @@ type brokerLayout struct {
 	// the broker's lifetime, which suits a per-session broker but would
 	// lock a long-running daemon out after the first thirty prompts.
 	confirmWindow time.Duration
+	// daemon marks `bwai broker serve`, whose agents run as another user
+	// rather than in a sandbox.
+	daemon bool
 }
 
 // NewBroker prepares the tmpdir and listeners. extraRoots, when non-empty,
@@ -254,6 +258,7 @@ func newBroker(cfg BrokerConfig, l brokerLayout, projectDir, auditPath string, e
 		brokerSock:    brokerSock,
 		allowedUIDs:   l.allowedUIDs,
 		confirmWindow: l.confirmWindow,
+		daemon:        l.daemon,
 		pending:       map[string]*pendingRequest{},
 		notifByID:     map[uint32]*pendingRequest{},
 	}
@@ -428,7 +433,11 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		b.handleCheck(enc, req)
 		return
 	case opContext:
-		_ = enc.Encode(brokerFrame{Type: frameTypeContext, Data: agentContext(b.cfg.Rules, "", "", false)})
+		ctx := agentContext(b.cfg.Rules, "", "", false)
+		if b.daemon {
+			ctx = daemonAgentContext(b.cfg.Rules)
+		}
+		_ = enc.Encode(brokerFrame{Type: frameTypeContext, Data: ctx})
 		return
 	default:
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})

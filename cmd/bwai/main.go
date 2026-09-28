@@ -597,15 +597,12 @@ func sortedKeys(m map[string]string) []string {
 // conventions can be wired up the same way.
 const agentMemoryFileContent = `# bwai broker
 
-This shell runs inside a bwai sandbox. The project working tree is
-read-write and the network is reachable, but host-only credentials —
-` + "`~/.gnupg`" + `, ` + "`~/.ssh`" + `, ` + "`~/.aws`" + `, ` + "`gh`" + `'s auth, etc. — are deliberately
-not mounted into the sandbox.
+{{intro}}
 
 ` + "`bwai-outside`" + ` is a narrow escape hatch for commands that need those
 host credentials. **Default to running commands directly.** Only reach
-for ` + "`bwai-outside`" + ` when a command would otherwise fail because the
-sandbox hides a credential it needs. Ordinary work on local files —
+for ` + "`bwai-outside`" + ` when a command would otherwise fail because a
+credential it needs is deliberately out of reach. Ordinary work on local files —
 including reading, editing, and committing — does *not* need it.
 
 Use ` + "`bwai-outside`" + ` when the command requires host-only state:
@@ -626,8 +623,8 @@ absolute path inside the project, or pipe them with ` + "`--stdin`" + `:
 bwai-outside --stdin gh issue create -R owner/repo -t "Title" -F - < body.md
 ` + "```" + `
 
-Commits are signed on the host without any extra step: inside the
-sandbox, git's signing program is ` + "`bwai-gpg`" + `, which hands the commit to the
+Commits are signed on the host without any extra step: here, git's
+signing program is ` + "`bwai-gpg`" + `, which hands the commit to the
 broker to sign with the host's key. Just run ` + "`git commit`" + ` as usual.
 
 Pushing has its own command, ` + "`git-safe`" + `. It is already on your ` + "`PATH`" + ` —
@@ -645,7 +642,7 @@ push URL must be listed in ` + "`broker.push_allowed_urls`" + `; an empty list a
 no push.
 
 Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
-these all succeed inside the sandbox:
+these all succeed without it:
 
 ` + "```sh" + `
 git status
@@ -658,7 +655,7 @@ npm install
 
 Heuristic: if a command only touches the project tree or the network,
 run it directly. ` + "`bwai-outside`" + ` is for the small set of operations
-that need a credential the sandbox deliberately hides.
+that need a credential you deliberately do not hold.
 
 - ` + "`bwai-outside --help`" + ` (or no args) — prints this help and the
   current rule list, including which commands are auto-allowed and
@@ -767,16 +764,37 @@ func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree 
 	return os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644)
 }
 
-// agentContext renders the agent guidance with the live rule set. It is
-// also served over the broker socket (`bwai-outside --context`) for
-// agents that run outside a bwai sandbox.
+const sandboxIntro = `This shell runs inside a bwai sandbox. The project working tree is
+read-write and the network is reachable, but host-only credentials —
+` + "`~/.gnupg`" + `, ` + "`~/.ssh`" + `, ` + "`~/.aws`" + `, ` + "`gh`" + `'s auth, etc. — are deliberately
+not mounted into the sandbox.`
+
+const daemonIntro = `You run as a dedicated Unix user whose only job is agent work. You can
+install and change anything you own — including with ` + "`sudo`" + ` inside your
+container — and the network is reachable, but the credentials for signing,
+pushing and GitHub belong to a different user and are deliberately out of
+your reach. Work under ` + "`~/work`" + `: the broker refuses requests from anywhere
+else.`
+
+// agentContext renders the guidance for an agent in a bwai sandbox, with
+// the live rule set.
 func agentContext(rules []Rule, worktreeRoot, mainTree string, exposeMain bool) string {
+	return renderAgentContext(sandboxIntro, rules, worktreeRoot, mainTree, exposeMain)
+}
+
+// daemonAgentContext is the guidance `bwai broker serve` hands out over
+// `bwai-outside --context`, for agents running as a separate user.
+func daemonAgentContext(rules []Rule) string {
+	return renderAgentContext(daemonIntro, rules, "", "", false)
+}
+
+func renderAgentContext(intro string, rules []Rule, worktreeRoot, mainTree string, exposeMain bool) string {
 	var b strings.Builder
-	b.WriteString(agentMemoryFileContent)
+	b.WriteString(strings.Replace(agentMemoryFileContent, "{{intro}}", intro, 1))
 	if worktreeRoot != "" {
 		b.WriteString(renderWorktreeSection(worktreeRoot, mainTree, exposeMain))
 	}
-	b.WriteString("\n## Broker rules for this sandbox\n\n")
+	b.WriteString("\n## Broker rules\n\n")
 	b.WriteString("This is exactly what the broker will run, and what it will ask a\n")
 	b.WriteString("human to approve. A command matching no rule is denied, so check\n")
 	b.WriteString("here before trying something and finding out the hard way.\n\n")

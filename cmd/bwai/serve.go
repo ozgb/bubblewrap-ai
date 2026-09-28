@@ -38,6 +38,7 @@ func NewServeBroker(cfg BrokerConfig, auditPath string) (*Broker, error) {
 		sockMode:      0o666,
 		allowedUIDs:   cfg.Serve.AllowedUIDs,
 		confirmWindow: serveConfirmWindow,
+		daemon:        true,
 	}, "", auditPath, cfg.Serve.Roots)
 }
 
