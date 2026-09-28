@@ -83,56 +83,25 @@ func runBrokerServe(args []string) int {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	done := make(chan struct{})
-	go watchConfig(b, path, configPollInterval, hup, done)
+	go watchConfig([]string{path}, configPollInterval, hup, done, serveReloader(b, path),
+		func(msg string, _ bool) { fmt.Fprintln(os.Stderr, "bwai broker: "+msg) })
 	b.Serve()
 	close(done)
 	return 0
 }
 
-const configPollInterval = 2 * time.Second
-
-// watchConfig reloads the daemon's config when the file changes, or on
-// SIGHUP. It polls rather than using inotify: editors replace files by
-// rename, and a stat per interval sees that without re-arming watches.
-func watchConfig(b *Broker, path string, every time.Duration, hup <-chan os.Signal, done <-chan struct{}) {
-	last := fileStamp(path)
-	tick := time.NewTicker(every)
-	defer tick.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-hup:
-		case <-tick.C:
-			if cur := fileStamp(path); cur == last {
-				continue
-			}
-		}
-		last = fileStamp(path)
+// serveReloader reloads the daemon from its config file.
+func serveReloader(b *Broker, path string) func() (string, error) {
+	return func() (string, error) {
 		cfg, err := loadConfig(path)
-		if err == nil {
-			err = b.reload(cfg.Broker)
-		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "bwai broker: %s not reloaded, keeping the previous config: %v\n", path, err)
-			continue
+			return "", err
 		}
-		fmt.Printf("bwai broker: reloaded %s (%d rules)\n", path, len(cfg.Broker.Rules))
+		if err := b.reload(cfg.Broker); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%d rules", len(cfg.Broker.Rules)), nil
 	}
-}
-
-// fileStamp identifies a version of a file well enough to notice an edit.
-func fileStamp(path string) string {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return ""
-	}
-	st, _ := fi.Sys().(*syscall.Stat_t)
-	var ino uint64
-	if st != nil {
-		ino = st.Ino
-	}
-	return fmt.Sprintf("%d/%d/%d", fi.ModTime().UnixNano(), fi.Size(), ino)
 }
 
 // reload swaps in a new config for requests that start after it. The

@@ -142,8 +142,7 @@ path, so `~/work` qualifies.
   bwai-broker` forces it. A file that fails to parse or validate is
   logged and the previous config stays in force. Moving `serve.socket`
   or the web approval address still needs a restart. The per-sandbox
-  broker never reloads: its allowlists are snapshots taken at session
-  start, on purpose.
+  broker reloads too; see the README.
 - **Confirm cap.** The 30-confirm cap counts over the last hour rather
   than the process lifetime.
 - **Approvals.** A headless box has no desktop notifications. Confirm

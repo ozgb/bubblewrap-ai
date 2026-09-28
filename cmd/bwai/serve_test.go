@@ -159,7 +159,7 @@ func TestServeHotReload(t *testing.T) {
 	hup := make(chan os.Signal, 1)
 	done := make(chan struct{})
 	t.Cleanup(func() { close(done) })
-	go watchConfig(b, path, 20*time.Millisecond, hup, done)
+	go watchConfig([]string{path}, 20*time.Millisecond, hup, done, serveReloader(b, path), func(string, bool) {})
 
 	action := func() string {
 		frames := sendRequest(t, sock, brokerRequest{V: 1, Op: opCheck, Argv: []string{"git-sign"}})

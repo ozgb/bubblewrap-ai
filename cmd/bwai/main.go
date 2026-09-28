@@ -208,6 +208,23 @@ func runSandbox() int {
 		}
 		go broker.Serve()
 		defer broker.Close()
+
+		// The global config and trusted.json are read-only in the sandbox,
+		// and a local file only counts once trusted, so the policy can
+		// follow edits mid-session. Nothing is printed: the terminal belongs
+		// to the agent's TUI.
+		stopWatch := make(chan struct{})
+		defer close(stopWatch)
+		reload := sessionReloader(broker, configPath, localPath, localState == localApplied, func(bc BrokerConfig) {
+			_ = installAgentMemoryFile(broker.TmpDir(), bc.Rules, worktreeRoot, worktreeMainTree, exposeMain)
+		})
+		go watchConfig([]string{configPath, localPath, trustStorePath()}, configPollInterval, nil, stopWatch, reload,
+			func(msg string, ok bool) {
+				broker.auditLog.write(auditEntry{Decision: msg})
+				if !ok {
+					notifier("bwai: "+msg, currentDir)
+				}
+			})
 	}
 
 	// Linked git worktrees keep their real git dir inside the main repo,

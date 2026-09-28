@@ -598,10 +598,9 @@ func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx in
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
-	// Hand the git-safe push its allowlist as a snapshot from this broker's
-	// in-memory config. It is set unconditionally (empty included) so a
-	// stray host environment value can never widen it, and so the only
-	// source inside the sandbox is the value captured at session start.
+	// Hand the git-safe push its allowlist from this broker's in-memory
+	// config. It is set unconditionally (empty included) so a stray host
+	// environment value can never widen it.
 	if len(req.Argv) > 0 && req.Argv[0] == "git-safe" {
 		cfg := b.conf()
 		cmd.Env = append(cmd.Env,

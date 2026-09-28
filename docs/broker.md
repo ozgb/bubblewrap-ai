@@ -426,10 +426,11 @@ most one remote name — and enforces the policy in code:
   updates the remote-tracking ref and upstream with the sandbox's git.
 
 The allowlist and the protected-branch list are trust anchors, not ordinary
-settings: the broker snapshots both at session start and injects them into
-the host-side push (as `BWAI_PUSH_ALLOWED` and `BWAI_PROTECTED_BRANCHES`), so
-a mid-session edit to the project tree — including the `.bwai.json` they may
-have been read from — cannot widen them. An empty URL list allows no push;
+settings: the broker injects its own copies into the host-side push (as
+`BWAI_PUSH_ALLOWED` and `BWAI_PROTECTED_BRANCHES`), and those copies only
+change when the broker reloads its config — which takes a project-local
+`.bwai.json` in only once it is trusted, so an edit in the project tree
+cannot widen them. An empty URL list allows no push;
 the built-in protected branches are always in force. URL entries are
 normalised before comparison, so `git@github.com:o/r.git` and
 `https://github.com/o/r` are the same entry.

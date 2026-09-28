@@ -306,10 +306,10 @@ func planPush(branch, remote, dest, sha string, remoteExists, fastForward bool, 
 	return []string{"git", "push", dest, sha + ":refs/heads/" + branch}, nil
 }
 
-// pushAllowedEnv carries the broker's push-allowlist snapshot to the
-// host-side push. It is the snapshot, not an on-disk config read, that
-// authorises: the project tree is writable inside the sandbox, so opening
-// .bwai.json at push time could be widened mid-session.
+// pushAllowedEnv carries the broker's push allowlist to the host-side
+// push. The broker's in-memory config authorises, not an on-disk read:
+// the project tree is writable inside the sandbox, and the broker only
+// takes a .bwai.json in once it is trusted.
 const pushAllowedEnv = "BWAI_PUSH_ALLOWED"
 
 // pushAllowedURLs returns the allowlist. The broker always sets the env var
@@ -372,7 +372,7 @@ func allowedEntry(norm string, allowed []string) string {
 }
 
 // protectedBranchesEnv carries the broker's configured protected-branch
-// patterns, snapshotted alongside pushAllowedEnv and for the same reason.
+// patterns, passed alongside pushAllowedEnv and for the same reason.
 const protectedBranchesEnv = "BWAI_PROTECTED_BRANCHES"
 
 // protectedBranchPatterns returns the built-in names plus any configured

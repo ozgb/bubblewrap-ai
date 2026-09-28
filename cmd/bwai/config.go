@@ -76,10 +76,10 @@ type BrokerConfig struct {
 
 	// PushAllowedURLs is the set of remote URLs `git-safe push` may target,
 	// compared after normalisation. It is a trust anchor rather than an
-	// ordinary setting: the broker snapshots it at session start and injects
-	// it into the host-side push, so a mid-session edit to the project tree
-	// (including the project-local .bwai.json it may have been read from)
-	// cannot widen it. Empty means every push is refused.
+	// ordinary setting: the broker injects its own copy into the host-side
+	// push, and a project-local .bwai.json only reaches that copy once it is
+	// trusted, so an edit in the project tree cannot widen it. Empty means
+	// every push is refused.
 	PushAllowedURLs []string `json:"push_allowed_urls"`
 
 	// ProtectedBranches adds branch-name patterns `git-safe push` refuses,
@@ -87,7 +87,7 @@ type BrokerConfig struct {
 	// exact name or a shell glob, so "release-*" or "release/*" covers a
 	// family. The branch being pushed is the destination branch, since the
 	// refspec is always HEAD:refs/heads/<branch>. Like PushAllowedURLs it is
-	// a trust anchor: snapshotted at session start and injected into the push.
+	// a trust anchor, injected into the push from the broker's own config.
 	ProtectedBranches []string `json:"protected_branches"`
 
 	// Serve configures `bwai broker serve`, the long-running broker for
