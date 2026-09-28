@@ -272,9 +272,15 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	return true, applyConfigData(cfg, data, path, merge)
+}
+
+// applyConfigData is applyConfigFile on bytes already read, so a caller
+// that has checked those exact bytes applies the same ones.
+func applyConfigData(cfg *Config, data []byte, path string, merge bool) error {
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil {
-		return false, fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	// Snapshot the base lists before decoding: json.Unmarshal reuses a
 	// slice's backing array, so appending afterwards would otherwise see the
@@ -289,7 +295,7 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 		prevRules = cloneRules(cfg.Broker.Rules)
 	}
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return false, fmt.Errorf("%s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	if merge {
 		if _, ok := keys["home_allow"]; ok {
@@ -311,7 +317,7 @@ func applyConfigFile(cfg *Config, path string, merge bool) (bool, error) {
 			cfg.Broker.Rules = append(prevRules, cfg.Broker.Rules...)
 		}
 	}
-	return true, nil
+	return nil
 }
 
 // brokerKeyPresent reports whether the top-level "broker" object names key.

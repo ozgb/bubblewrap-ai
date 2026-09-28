@@ -57,6 +57,8 @@ func main() {
 			os.Exit(runGitSafe(os.Args[2:]))
 		case "git-sign":
 			os.Exit(runGitSign(os.Args[2:]))
+		case "trust":
+			os.Exit(runTrust(os.Args[2:]))
 		}
 	}
 	os.Exit(runSandbox())
@@ -101,16 +103,19 @@ func runSandbox() int {
 	if legacyConfig {
 		fmt.Fprintf(os.Stderr, "bwai: %s is deprecated; move it to %s\n", configPath, defaultConfigPath())
 	}
-	// A .bwai.json in the sandbox root layers on top of the global config:
-	// its list fields are appended, everything else overrides. Skip it if
-	// it is the base itself (e.g. running from $HOME).
+	// A trusted .bwai.json in the sandbox root layers on top of the global
+	// config: its list fields are appended, everything else overrides. Skip
+	// it if it is the base itself (e.g. running from $HOME).
 	localPath := filepath.Join(currentDir, ".bwai.json")
 	if localPath == configPath {
 		localPath = ""
 	}
-	cfg, err := loadLayeredConfig(configPath, localPath)
+	cfg, localState, err := loadProjectConfig(configPath, localPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bwai: warning: could not load config: %v\n", err)
+	}
+	if localState == localUntrusted {
+		fmt.Fprintln(os.Stderr, untrustedNotice(localPath))
 	}
 	homeAllow = cfg.HomeAllow
 	homeBlock = cfg.HomeBlock

@@ -194,6 +194,14 @@ For sub-paths (entries containing a `/`), `home_allow` is applied after `home_bl
 
 A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended), `env_set` (a map, merged per key), and `broker.rules` (appended, base first) — are added to the base, so a project only names what it adds. Because rule matching is first-match, base rules keep precedence and a project's rules extend the set rather than shadowing it. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags) and the trust-anchor lists `broker.push_allowed_urls` and `broker.protected_branches` (a project may narrow them). A missing local file is ignored.
 
+The local file sits in the tree the agent can write, and it is read the next time `bwai` starts there, so it is only applied once you have trusted its exact contents:
+
+```sh
+bwai trust            # ./.bwai.json; or `bwai trust path/to/.bwai.json`
+```
+
+`bwai trust` prints the file and records its sha256 in `~/.config/bwai/trusted.json`, which the sandbox cannot write. An untrusted or since-edited file is skipped with a notice, so an agent cannot write itself a wider sandbox — `bwrap_path`, `home_allow: [".ssh"]`, `auto_allow` rules — for its next session.
+
 ```json
 {
   "home_allow": [".rwe"]

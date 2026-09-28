@@ -74,10 +74,13 @@ func runBrokerCheck(args []string) int {
 			localPath = ""
 		}
 	}
-	cfg, err := loadLayeredConfig(configPath, localPath)
+	cfg, localState, err := loadProjectConfig(configPath, localPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bwai broker check: load config: %v\n", err)
 		return 2
+	}
+	if localState == localUntrusted {
+		fmt.Fprintln(os.Stderr, untrustedNotice(localPath))
 	}
 
 	return printCheckResult(os.Stdout, cfg.Broker.Rules, argv)
