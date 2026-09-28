@@ -55,7 +55,8 @@ deploy-box: test build
 	@test -n "$(BOX)" || { echo "usage: make deploy-box BOX=<host> [BROKER_USER=...] [AGENT_USER=...]"; exit 1; }
 	@# Copy then rename, so a running broker's executable is never rewritten in place.
 	scp -q $(BIN_DIR)/$(BINARY) $(BROKER_USER)@$(BOX):.local/bin/$(BINARY).new
-	ssh $(BROKER_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY) && systemctl --user restart bwai-broker && systemctl --user is-active bwai-broker'
+	scp -q scripts/agent-box/bwai-broker.service $(BROKER_USER)@$(BOX):.config/systemd/user/bwai-broker.service
+	ssh $(BROKER_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY) && systemctl --user daemon-reload && systemctl --user restart bwai-broker && systemctl --user is-active bwai-broker'
 	scp -q $(BIN_DIR)/$(BINARY) $(AGENT_USER)@$(BOX):.local/bin/$(BINARY).new
 	scp -q scripts/agent-box/bwai-refresh-context $(AGENT_USER)@$(BOX):.local/libexec/bwai/bwai-refresh-context
 	ssh $(AGENT_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY) && \
