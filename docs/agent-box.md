@@ -137,4 +137,13 @@ if something gets past it:
   requests, and no administration, secrets or workflow scopes.
 - Branch protection or a ruleset on the default branch: no force push,
   no deletion, changes through pull requests. This enforces the same
-  policy `git-safe push` does, on GitHub's side.
+  policy `git-safe push` does, on GitHub's side. A repository admin can
+  apply `scripts/agent-box/default-branch-ruleset.json` with
+
+  ```sh
+  gh api -X POST repos/OWNER/REPO/rulesets --input scripts/agent-box/default-branch-ruleset.json
+  ```
+
+  It requires one approving review from someone other than the last
+  pusher, which matters when the agent pushes with your token: your own
+  approval no longer counts.

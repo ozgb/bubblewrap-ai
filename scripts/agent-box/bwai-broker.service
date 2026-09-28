@@ -2,6 +2,9 @@
 Description=bwai host-execution broker for agent users
 
 [Service]
+# Rules name host commands (gh, git) by PATH lookup; a user unit's default
+# PATH has no ~/.local/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/bwai broker serve
 Restart=on-failure
 RestartSec=5
