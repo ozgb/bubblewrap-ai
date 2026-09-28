@@ -219,6 +219,46 @@ func TestBroker_RejectsCwdSymlinkOutOfProject(t *testing.T) {
 	}
 }
 
+func TestBroker_RejectsHostPathArguments(t *testing.T) {
+	projectDir := t.TempDir()
+	inside := filepath.Join(projectDir, "body.md")
+	if err := os.WriteFile(inside, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(secret, []byte("s3cret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules:   []Rule{{Match: []string{"echo", "**"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+	denied := [][]string{
+		{"echo", "--body-file", secret},
+		{"echo", "--body-file=" + secret},
+		{"echo", "-F", "field=@" + secret},
+		{"echo", "../../../../../../../../" + secret},
+	}
+	for _, argv := range denied {
+		frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{V: 1, Argv: argv, Cwd: projectDir})
+		if len(frames) != 1 || frames[0].Type != frameTypeDenied || frames[0].Reason != denyReasonPath {
+			t.Errorf("%v: frames = %+v, want a path denial", argv, frames)
+		}
+	}
+	allowed := [][]string{
+		{"echo", "--body-file", inside},
+		{"echo", "-R", "owner/repo", "--title", "fix a/b"},
+		{"echo", "-"},
+	}
+	for _, argv := range allowed {
+		frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{V: 1, Argv: argv, Cwd: projectDir})
+		if _, _, code := collectStreams(t, frames); code == nil || *code != 0 {
+			t.Errorf("%v: frames = %+v, want exit 0", argv, frames)
+		}
+	}
+}
+
 func TestBroker_FeedsStdin(t *testing.T) {
 	projectDir := t.TempDir()
 	cfg := BrokerConfig{

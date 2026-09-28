@@ -91,6 +91,7 @@ const (
 	denyReasonTimeout   = "timeout"
 	denyReasonRateLimit = "ratelimit"
 	denyReasonInvalid   = "invalid"
+	denyReasonPath      = "path"
 )
 
 // Defaults that match the doc.
@@ -444,6 +445,12 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		return
 	}
 	req.Cwd = resolved
+	if tok := b.pathOutsideRoots(req.Argv[1:]); tok != "" {
+		b.auditLog.write(auditEntry{Argv: req.Argv, Cwd: req.Cwd, Decision: "denied:" + denyReasonPath})
+		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonPath,
+			Data: fmt.Sprintf("argument %q names a host path outside the project", tok)})
+		return
+	}
 
 	verdict := b.matchVerdict(req.Argv)
 	action, idx := verdict.Action, verdict.Idx
@@ -721,6 +728,45 @@ func (b *Broker) resolveCwd(cwd string) (string, bool) {
 		return "", false
 	}
 	return resolved, withinAny(resolved, b.resolvedRoots())
+}
+
+// pathOutsideRoots returns the first argument that names an existing host
+// path outside the roots, or "". Host commands run with the host user's
+// file access, so without this an allowed command that reads a file —
+// `gh issue create --body-file ~/.git-credentials`, `gh api -F x=@key` —
+// posts host secrets wherever the command writes. A rule cannot express
+// "any file-valued flag", so the check is on every argument: the whole
+// token, the value after "=", and a leading "@" stripped. Relative paths
+// resolve against the empty directory commands run in.
+func (b *Broker) pathOutsideRoots(args []string) string {
+	roots := b.resolvedRoots()
+	cwd := filepath.Join(b.tmpDir, "cwd")
+	for _, tok := range args {
+		cands := []string{tok}
+		if _, v, ok := strings.Cut(tok, "="); ok {
+			cands = append(cands, v)
+		}
+		for _, c := range cands {
+			c = strings.TrimPrefix(c, "@")
+			if c == "" || c == "-" {
+				continue
+			}
+			p := c
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(cwd, p)
+			}
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			resolved, err := filepath.EvalSymlinks(p)
+			if err != nil || !withinAny(resolved, roots) {
+				if resolved != cwd {
+					return tok
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // resolvedRoots is the project dir plus the extra roots, each resolved

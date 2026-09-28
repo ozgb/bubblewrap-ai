@@ -334,6 +334,13 @@ three views — list, denial, dry run — share one coordinate system.
   `core.sshCommand`, filter drivers — and any git a host command runs
   there executes it with host credentials. Rules that hand git a path
   into the tree (`git -C`, `--git-dir`, `gh pr checkout`) reopen that.
+- **Path arguments confined.** An argument naming an existing host path
+  outside the roots is refused (`denied: path`) — the token itself, the
+  value after `=`, and after a leading `@`, with relative paths resolved
+  against the empty cwd. Host commands read files with the host user's
+  access, so without this any allowed command with a file-valued flag
+  (`gh issue create --body-file`, `gh api -F x=@file`) could publish a
+  host secret, and no rule pattern can name "a file flag anywhere".
 - **Rate limit.** Max 1 confirm prompt per 2s, 30 confirms per session.
   Excess requests get `denied: ratelimit`. `auto_allow` is not rate
   limited.

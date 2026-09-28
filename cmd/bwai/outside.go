@@ -298,6 +298,10 @@ func outsideExec(argv []string, stdin []byte, stdout, stderr io.Writer) int {
 			}
 			return *fr.Code
 		case frameTypeDenied:
+			if fr.Data != "" {
+				fmt.Fprintf(stderr, "%s: denied (%s): %s\n", outsideProg, fr.Reason, fr.Data)
+				return 126
+			}
 			fmt.Fprintf(stderr, "%s: denied (%s)%s; run `bwai-outside --list-rules` to see what's allowed\n",
 				outsideProg, fr.Reason, matchedRuleHint(fr.Matched))
 			return 126

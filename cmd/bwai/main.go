@@ -618,8 +618,9 @@ Host commands run in an empty directory on the host, never in your
 project — a repository's hooks and config would otherwise run with the
 host's credentials. So relative paths do not resolve, and ` + "`gh`" + ` cannot
 infer the repository: always pass ` + "`-R owner/repo`" + ` (read it from
-` + "`git remote -v`" + `), and ` + "`--head <branch>`" + ` for ` + "`gh pr create`" + `. To hand a
-command a file's contents, use ` + "`--stdin`" + `:
+` + "`git remote -v`" + `), and ` + "`--head <branch>`" + ` for ` + "`gh pr create`" + `. An argument
+naming an existing file outside the project is refused; give files by
+absolute path inside the project, or pipe them with ` + "`--stdin`" + `:
 
 ` + "```sh" + `
 bwai-outside --stdin gh issue create -R owner/repo -t "Title" -F - < body.md
