@@ -11,7 +11,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
-.PHONY: all build clean test lint fmt install uninstall install-hooks
+.PHONY: all build clean test lint fmt install uninstall install-hooks deploy-box
 
 all: build
 
@@ -43,6 +43,24 @@ fmt-check:
 
 lint:
 	golangci-lint run ./...
+
+# Update an agent box (docs/agent-box.md): the broker user's binary, then
+# the broker, then the agent's client. Needs ssh access as both users.
+#   make deploy-box BOX=192.168.1.62
+BOX         ?=
+BROKER_USER ?= $(USER)
+AGENT_USER  ?= agent
+
+deploy-box: test build
+	@test -n "$(BOX)" || { echo "usage: make deploy-box BOX=<host> [BROKER_USER=...] [AGENT_USER=...]"; exit 1; }
+	@# Copy then rename, so a running broker's executable is never rewritten in place.
+	scp -q $(BIN_DIR)/$(BINARY) $(BROKER_USER)@$(BOX):.local/bin/$(BINARY).new
+	ssh $(BROKER_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY) && systemctl --user restart bwai-broker && systemctl --user is-active bwai-broker'
+	scp -q $(BIN_DIR)/$(BINARY) $(AGENT_USER)@$(BOX):.local/bin/$(BINARY).new
+	ssh $(AGENT_USER)@$(BOX) 'mv -f ~/.local/bin/$(BINARY).new ~/.local/bin/$(BINARY)'
+	@echo "local:  $(VERSION)"
+	@printf 'broker: '; ssh $(BROKER_USER)@$(BOX) '~/.local/bin/$(BINARY) --version'
+	@printf 'agent:  '; ssh $(AGENT_USER)@$(BOX) '~/.local/bin/$(BINARY) --version'
 
 install-hooks:
 	cp scripts/hooks/pre-commit .git/hooks/pre-commit

@@ -86,6 +86,17 @@ systemctl --user daemon-reload
 systemctl --user enable --now bwai-broker
 ```
 
+To update the box later, from a checkout on any machine with ssh access
+as both users:
+
+```sh
+make deploy-box BOX=<host>        # BROKER_USER defaults to $USER, AGENT_USER to agent
+```
+
+It runs the tests, builds, replaces the broker user's binary and
+restarts `bwai-broker`, replaces the agent's client, and prints all three
+versions so you can see they match.
+
 `gh`, `git` and whatever else your rules name must be on the broker
 user's host `PATH`, not only inside a toolbox.
 
