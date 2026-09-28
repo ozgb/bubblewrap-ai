@@ -58,12 +58,7 @@ func runBrokerServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "bwai broker serve: %v\n", err)
 		return 1
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bwai broker serve: %v\n", err)
-		return 1
-	}
-	b, err := NewServeBroker(cfg.Broker, defaultAuditPath(home))
+	b, err := NewServeBroker(cfg.Broker, defaultAuditPath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bwai broker serve: %v\n", err)
 		return 1

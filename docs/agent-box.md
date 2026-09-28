@@ -134,7 +134,7 @@ path, so `~/work` qualifies.
 Everything else is the same broker: host commands run in an empty
 directory, `git-safe push` goes through the host mirror, commits are
 signed by `git-sign`, and the audit log is at
-`~/.local/state/bwai/broker.log`.
+`~/.local/share/bwai-broker/broker.log`.
 
 ## Backstops outside the box
 

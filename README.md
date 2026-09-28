@@ -352,7 +352,7 @@ The page is served on a loopback-only ephemeral port (`web.addr`, default `127.0
 
 `always-this-session` adds the exact argv to an in-memory allowlist for the lifetime of this `bwai` process. Never persisted.
 
-The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, argv, cwd, matched rule, decision, exit code.
+The audit log lands at `~/.local/share/bwai-broker/broker.log` — a directory the sandbox sees as an empty tmpfs, so the agent can neither read nor rewrite it — as JSONL: timestamp, argv, cwd, matched rule, decision, exit code.
 
 ### Restricted commands (`git-safe`)
 

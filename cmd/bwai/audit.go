@@ -61,11 +61,8 @@ func (a *auditLogger) Close() error {
 	return a.f.Close()
 }
 
-// defaultAuditPath is the location described in the doc:
-// ~/.local/state/bwai/broker.log. XDG_STATE_HOME wins if set.
-func defaultAuditPath(home string) string {
-	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "bwai", "broker.log")
-	}
-	return filepath.Join(home, ".local", "state", "bwai", "broker.log")
+// defaultAuditPath keeps the log in the broker's private dir, which the
+// sandbox gets as a tmpfs: a log the agent can edit records nothing.
+func defaultAuditPath() string {
+	return filepath.Join(brokerPrivateDir(), "broker.log")
 }

@@ -181,7 +181,7 @@ func runSandbox() int {
 		// A linked worktree's git dirs are bound read-write too, and
 		// git-safe has to read them to find the branch it pushes.
 		roots = append(roots, gitWorktreeDirs(currentDir)...)
-		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(home), roots...)
+		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(), roots...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: broker init failed: %v\n", err)
 			return 1

@@ -346,7 +346,9 @@ three views — list, denial, dry run — share one coordinate system.
   limited.
 - **Sockets.** Tmpdir 0700; both sockets 0600; owned by the invoking
   user.
-- **Audit log** at `~/.local/state/bwai/broker.log`. Append-only JSONL:
+- **Audit log** at `~/.local/share/bwai-broker/broker.log`, in the
+  broker's private dir, which the sandbox gets as a tmpfs so the agent
+  cannot rewrite its own record. Append-only JSONL:
   timestamp, request id, argv, cwd, matched rule, decision, exit code.
 
 ### Defaults
