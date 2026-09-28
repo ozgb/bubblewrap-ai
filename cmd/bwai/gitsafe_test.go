@@ -279,6 +279,21 @@ func TestGitSafePushIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("pushes from a shallow clone", func(t *testing.T) {
+		shallow := filepath.Join(root, "shallow")
+		gitRun(t, root, "clone", "--quiet", "--depth", "1", "--branch", "feature", "file://"+origin, shallow)
+		gitRun(t, shallow, "remote", "set-url", "origin", origin)
+		gitRun(t, shallow, "checkout", "-q", "-b", "from-shallow")
+		gitRun(t, shallow, "commit", "--allow-empty", "-m", "shallow work")
+		t.Setenv(requestCwdEnv, shallow)
+		if code := push(t); code != 0 {
+			t.Fatalf("push exit %d, want 0", code)
+		}
+		if got, want := remoteSha(t, shallow, "origin", "from-shallow"), headSha(t, shallow); got != want {
+			t.Fatalf("origin/from-shallow = %q, want HEAD %q", got, want)
+		}
+	})
+
 	t.Run("never runs the repository's hooks or config", func(t *testing.T) {
 		marker := filepath.Join(root, "pwned")
 		evil := filepath.Join(root, "evil.sh")

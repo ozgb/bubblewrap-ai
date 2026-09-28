@@ -211,18 +211,21 @@ func runGitSafePush(args []string) int {
 	// safe.directory is scoped to this fetch: it lets upload-pack serve a
 	// repository owned by another user (the agent box), and upload-pack
 	// reads that repository without executing anything from it.
-	if out, err := mirrorGit(mirror,
+	// --update-shallow accepts a branch from a shallow clone; without it
+	// git drops the ref with only a warning and still exits 0.
+	out, err := mirrorGit(mirror,
 		"-c", "safe.directory="+repo.commonDir,
 		"-c", "safe.directory="+repo.workTree,
 		"-c", "transfer.fsckObjects=true",
-		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
-		repo.commonDir, "+refs/heads/"+branch+":"+incoming); err != nil {
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--update-shallow",
+		repo.commonDir, "+refs/heads/"+branch+":"+incoming)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "git-safe: cannot read branch %q from the repository: %v\n%s", branch, err, out)
 		return 1
 	}
-	sha, err := mirrorGit(mirror, "rev-parse", "--verify", incoming)
+	sha, err := mirrorGit(mirror, "rev-parse", "--verify", "--quiet", incoming)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
+		fmt.Fprintf(os.Stderr, "git-safe: branch %q did not arrive in the host mirror\n%s", branch, out)
 		return 1
 	}
 	sha = strings.TrimSpace(sha)
