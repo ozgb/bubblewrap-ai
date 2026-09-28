@@ -41,6 +41,8 @@ func runOutsideClient(argv []string) int {
 		return runOutsideCheck(argv[1:])
 	case "--stdin":
 		return runOutsideStdin(argv[1:])
+	case "--context":
+		return runOutsideContext()
 	}
 	return runOutsideExec(argv)
 }
@@ -55,6 +57,7 @@ func runOutsideHelp() int {
 	fmt.Fprintln(os.Stdout, "  bwai-outside --list-rules          print the rules and exit")
 	fmt.Fprintln(os.Stdout, "  bwai-outside --check <cmd> [args]  dry-run: show which rule would match, run nothing")
 	fmt.Fprintln(os.Stdout, "  bwai-outside --stdin <cmd> [args]  run on host with this process's stdin as its stdin")
+	fmt.Fprintln(os.Stdout, "  bwai-outside --context             print the agent guidance and rules as markdown")
 	fmt.Fprintln(os.Stdout, "  bwai-outside --help                this message")
 	fmt.Fprintln(os.Stdout, "")
 	fmt.Fprintln(os.Stdout, "Anything not matched by an allow/confirm rule is denied.")
@@ -198,6 +201,31 @@ func printRules(w io.Writer, rules []Rule) {
 	fmt.Fprintln(w, "  `gh issue -R org/repo create **` instead (typically the AUTO_ALLOW one).")
 	fmt.Fprintln(w, "Not sure which rule fires? `bwai-outside --check <cmd> [args...]` asks the broker dry-run.")
 	fmt.Fprintln(w, "Use `bwai approve` on the host to clear CONFIRM prompts.")
+}
+
+// runOutsideContext prints the broker's agent guidance, for agents whose
+// instructions are not injected by a bwai sandbox.
+func runOutsideContext() int {
+	conn, code := brokerDial()
+	if conn == nil {
+		return code
+	}
+	defer conn.Close()
+	if err := json.NewEncoder(conn).Encode(brokerRequest{V: 1, Op: opContext}); err != nil {
+		fmt.Fprintf(os.Stderr, outsideProg+": send: %v\n", err)
+		return 127
+	}
+	var fr brokerFrame
+	if err := json.NewDecoder(conn).Decode(&fr); err != nil {
+		fmt.Fprintf(os.Stderr, outsideProg+": recv: %v\n", err)
+		return 127
+	}
+	if fr.Type != frameTypeContext {
+		fmt.Fprintf(os.Stderr, outsideProg+": unexpected frame %q\n", fr.Type)
+		return 127
+	}
+	_, _ = io.WriteString(os.Stdout, fr.Data)
+	return 0
 }
 
 // runOutsideStdin forwards argv with all of stdin attached. Opt-in rather

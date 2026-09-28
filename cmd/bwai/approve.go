@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -178,6 +179,10 @@ func discoverApproveSockets() ([]string, error) {
 	matches, err := filepath.Glob("/tmp/bwai-*/approve.sock")
 	if err != nil {
 		return nil, err
+	}
+	daemon := filepath.Join(serveRuntimeDir(), "approve.sock")
+	if _, err := os.Stat(daemon); err == nil && !slices.Contains(matches, daemon) {
+		matches = append(matches, daemon)
 	}
 	if len(matches) == 0 {
 		return nil, errors.New("no bwai approve.sock found under /tmp/bwai-*; is bwai running with broker enabled?")

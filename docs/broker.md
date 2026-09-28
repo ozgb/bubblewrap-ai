@@ -501,6 +501,20 @@ $ bwai broker check git-safe push     # AUTO_ALLOW, rules[0]
 $ bwai broker check git push --force  # AUTO_DENY (implicit — no rule)
 ```
 
+## Daemon mode (`bwai broker serve`)
+
+The same broker can run long-lived, for agents that run as a separate
+Unix user rather than in a bwai sandbox. It listens on
+`broker.serve.socket`, accepts only the uids in
+`broker.serve.allowed_uids` (`SO_PEERCRED`), takes `broker.serve.roots`
+as the allowed request cwds, and counts the confirm cap over a sliding
+hour. `bwai-outside --context` fetches the agent guidance over the
+socket, since nothing injects it. Setup, and why the boundary has to be
+a UID rather than a container: [agent-box.md](agent-box.md).
+
+The per-sandbox broker checks peer credentials too, allowing only its own
+uid.
+
 ## Why not bash-style job control?
 
 The natural instinct is to model this on bash putting jobs in the

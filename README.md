@@ -401,6 +401,10 @@ The host never runs `git` in the agent's repository to do this. That is the poin
 
 Verification (`git log --show-signature`, `git verify-commit`) is not available inside the sandbox.
 
+### Agents running as another user (`bwai broker serve`)
+
+For a machine dedicated to agents, `bwai broker serve` runs the broker as a long-lived daemon for agents that run as a separate Unix user (in their own rootless containers, with `sudo` inside if you like), gated by the connecting uid. See [docs/agent-box.md](docs/agent-box.md).
+
 ### Telling the agent it can call `bwai-outside`
 
 The sandbox is a fresh world — agents need a way to discover `bwai-outside`. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Claude Code and Command Code opt in with a flag or mod, opencode uses a config environment variable, and Codex loads an isolated overlay at `~/.codex/AGENTS.md`; `bwai` does not modify the host's agent configuration.

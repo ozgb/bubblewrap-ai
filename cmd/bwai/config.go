@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 )
 
 type Config struct {
@@ -87,6 +89,24 @@ type BrokerConfig struct {
 	// refspec is always HEAD:refs/heads/<branch>. Like PushAllowedURLs it is
 	// a trust anchor: snapshotted at session start and injected into the push.
 	ProtectedBranches []string `json:"protected_branches"`
+
+	// Serve configures `bwai broker serve`, the long-running broker for
+	// agents that run as another user rather than inside a bwai sandbox.
+	// Only read from the global config.
+	Serve *ServeConfig `json:"serve,omitempty"`
+}
+
+// ServeConfig is the daemon's socket and the agents it answers.
+type ServeConfig struct {
+	// Socket is the broker socket path. It has to be the same path on the
+	// host and wherever the agent runs, and its directory must let the
+	// agent users reach it.
+	Socket string `json:"socket"`
+	// AllowedUIDs are the uids that may connect, checked with SO_PEERCRED.
+	AllowedUIDs []int `json:"allowed_uids"`
+	// Roots are the directories requests may come from — the agents' work
+	// trees. Paths must match between the host and the agent's view.
+	Roots []string `json:"roots"`
 }
 
 // WebConfig configures the loopback HTTP approval page used by the
@@ -329,6 +349,27 @@ func cloneRules(rules []Rule) []Rule {
 		}
 	}
 	return out
+}
+
+func validateServe(s *ServeConfig) error {
+	if s == nil {
+		return errors.New("broker.serve is not configured")
+	}
+	if !filepath.IsAbs(s.Socket) {
+		return fmt.Errorf("broker.serve.socket %q must be an absolute path", s.Socket)
+	}
+	if len(s.AllowedUIDs) == 0 {
+		return errors.New("broker.serve.allowed_uids must name at least one uid")
+	}
+	if len(s.Roots) == 0 {
+		return errors.New("broker.serve.roots must name at least one directory")
+	}
+	for _, r := range s.Roots {
+		if !filepath.IsAbs(r) {
+			return fmt.Errorf("broker.serve.roots entry %q must be an absolute path", r)
+		}
+	}
+	return nil
 }
 
 func validateConfig(cfg *Config) error {

@@ -754,6 +754,17 @@ func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
 // set only for sessions that started in a linked worktree ("" for main
 // checkouts) and selects the writable-paths wording via exposeMain.
 func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree string, exposeMain bool) error {
+	content := []byte(agentContext(rules, worktreeRoot, mainTree, exposeMain))
+	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), content, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644)
+}
+
+// agentContext renders the agent guidance with the live rule set. It is
+// also served over the broker socket (`bwai-outside --context`) for
+// agents that run outside a bwai sandbox.
+func agentContext(rules []Rule, worktreeRoot, mainTree string, exposeMain bool) string {
 	var b strings.Builder
 	b.WriteString(agentMemoryFileContent)
 	if worktreeRoot != "" {
@@ -766,11 +777,7 @@ func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree 
 	b.WriteString("```\n")
 	printRules(&b, rules)
 	b.WriteString("```\n")
-	content := []byte(b.String())
-	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), content, 0o644); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644)
+	return b.String()
 }
 
 // bwaiModContent is a command-code mod (loaded with `cmd --mod`) whose

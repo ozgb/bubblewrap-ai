@@ -11,17 +11,18 @@ import (
 )
 
 // runBrokerCLI dispatches the second-level word under `bwai broker …`.
-// Only `check` exists today; future subcommands (e.g. `list-rules`)
-// would land here.
 func runBrokerCLI(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "bwai broker: missing subcommand")
 		fmt.Fprintln(os.Stderr, "usage: bwai broker check [--config PATH] <argv>...")
+		fmt.Fprintln(os.Stderr, "       bwai broker serve [--config PATH]")
 		return 2
 	}
 	switch args[0] {
 	case "check":
 		return runBrokerCheck(args[1:])
+	case "serve":
+		return runBrokerServe(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "bwai broker: unknown subcommand %q\n", args[0])
 		return 2

@@ -14,8 +14,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -42,6 +44,7 @@ const (
 	opExec      = "exec"
 	opListRules = "list_rules"
 	opCheck     = "check"
+	opContext   = "context"
 )
 
 // Wire protocol — host → sandbox reply frames. Pointer for Code so the
@@ -68,6 +71,7 @@ const (
 	frameTypeDenied  = "denied"
 	frameTypeRules   = "rules"
 	frameTypeCheck   = "check"
+	frameTypeContext = "context"
 )
 
 // matchedRule reports which rule the matcher selected for an argv.
@@ -140,13 +144,35 @@ type Broker struct {
 	// dbus posts rich desktop notifications with Approve/Deny/Open
 	// buttons. nil when web mode is off or no session bus is reachable
 	// (headless) — the broker degrades to the oob notify-send nudge.
-	dbus        desktopNotifier
-	tmpDir      string
-	mu          sync.Mutex
-	pending     map[string]*pendingRequest
-	notifByID   map[uint32]*pendingRequest // D-Bus notification id → request
-	sessAllow   [][]string                 // per-session "always-this-session" allowlist
-	confirmHist []time.Time
+	dbus       desktopNotifier
+	tmpDir     string
+	brokerSock string
+	// allowedUIDs, when non-nil, is checked against the peer credentials
+	// of every broker.sock connection.
+	allowedUIDs   []int
+	confirmWindow time.Duration
+	mu            sync.Mutex
+	pending       map[string]*pendingRequest
+	notifByID     map[uint32]*pendingRequest // D-Bus notification id → request
+	sessAllow     [][]string                 // per-session "always-this-session" allowlist
+	confirmHist   []time.Time
+}
+
+// brokerLayout says where a broker keeps its sockets and who may connect.
+type brokerLayout struct {
+	// dir is host-only (0700): approve.sock, the helper binary, and the
+	// empty directory host commands run in.
+	dir        string
+	brokerSock string
+	sockMode   os.FileMode
+	// allowedUIDs gates broker.sock by the connecting process's uid
+	// (SO_PEERCRED). The per-sandbox broker allows only its own uid; the
+	// daemon allows the agent users it serves.
+	allowedUIDs []int
+	// confirmWindow is the period the confirm cap counts over; zero means
+	// the broker's lifetime, which suits a per-session broker but would
+	// lock a long-running daemon out after the first thirty prompts.
+	confirmWindow time.Duration
 }
 
 // NewBroker prepares the tmpdir and listeners. extraRoots, when non-empty,
@@ -154,7 +180,17 @@ type Broker struct {
 // worktree root). The caller is
 // responsible for invoking Serve in a goroutine and Close on shutdown.
 func NewBroker(cfg BrokerConfig, projectDir string, auditPath string, extraRoots ...string) (*Broker, error) {
-	tmpDir := fmt.Sprintf("/tmp/bwai-%d", os.Getpid())
+	dir := fmt.Sprintf("/tmp/bwai-%d", os.Getpid())
+	return newBroker(cfg, brokerLayout{
+		dir:         dir,
+		brokerSock:  filepath.Join(dir, "broker.sock"),
+		sockMode:    0o600,
+		allowedUIDs: []int{os.Getuid()},
+	}, projectDir, auditPath, extraRoots)
+}
+
+func newBroker(cfg BrokerConfig, l brokerLayout, projectDir, auditPath string, extraRoots []string) (*Broker, error) {
+	tmpDir := l.dir
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create tmpdir: %w", err)
 	}
@@ -167,8 +203,12 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string, extraRoots
 		}
 	}
 
-	brokerSock := filepath.Join(tmpDir, "broker.sock")
+	brokerSock := l.brokerSock
 	approveSock := filepath.Join(tmpDir, "approve.sock")
+	if c, err := net.Dial("unix", brokerSock); err == nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("%s is in use by another broker", brokerSock)
+	}
 	_ = os.Remove(brokerSock)
 	_ = os.Remove(approveSock)
 
@@ -176,7 +216,7 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string, extraRoots
 	if err != nil {
 		return nil, fmt.Errorf("listen broker.sock: %w", err)
 	}
-	if err := os.Chmod(brokerSock, 0o600); err != nil {
+	if err := os.Chmod(brokerSock, l.sockMode); err != nil {
 		_ = brokerLn.Close()
 		return nil, fmt.Errorf("chmod broker.sock: %w", err)
 	}
@@ -203,15 +243,18 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string, extraRoots
 	}
 
 	b := &Broker{
-		cfg:        cfg,
-		projectDir: projectDir,
-		extraRoots: extraRoots,
-		auditLog:   audit,
-		brokerLn:   brokerLn,
-		approveLn:  approveLn,
-		tmpDir:     tmpDir,
-		pending:    map[string]*pendingRequest{},
-		notifByID:  map[uint32]*pendingRequest{},
+		cfg:           cfg,
+		projectDir:    projectDir,
+		extraRoots:    extraRoots,
+		auditLog:      audit,
+		brokerLn:      brokerLn,
+		approveLn:     approveLn,
+		tmpDir:        tmpDir,
+		brokerSock:    brokerSock,
+		allowedUIDs:   l.allowedUIDs,
+		confirmWindow: l.confirmWindow,
+		pending:       map[string]*pendingRequest{},
+		notifByID:     map[uint32]*pendingRequest{},
 	}
 
 	// "web" prompt mode: bind a loopback HTTP server for the approval
@@ -246,6 +289,9 @@ func (b *Broker) TmpDir() string { return b.tmpDir }
 // BrokerSocketPath is the host-side path of broker.sock. The sandbox
 // sees this at /run/bwai/broker.sock.
 func (b *Broker) BrokerSocketPath() string {
+	if b.brokerSock != "" {
+		return b.brokerSock
+	}
 	return filepath.Join(b.tmpDir, "broker.sock")
 }
 
@@ -326,6 +372,9 @@ func (b *Broker) Close() error {
 			firstErr = err
 		}
 	}
+	if b.brokerSock != "" && !isWithin(b.tmpDir, b.brokerSock) {
+		_ = os.Remove(b.brokerSock)
+	}
 	return firstErr
 }
 
@@ -352,6 +401,17 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
 	}
+	// Checked after reading the request: closing with it unread would
+	// reset the connection before the client sees the denial.
+	if b.allowedUIDs != nil {
+		uid, err := peerUID(conn)
+		if err != nil || !slices.Contains(b.allowedUIDs, uid) {
+			b.auditLog.write(auditEntry{Decision: fmt.Sprintf("denied:peer uid %d not allowed", uid)})
+			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
+			return
+		}
+	}
+
 	if req.V != 1 {
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
@@ -365,6 +425,9 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		return
 	case opCheck:
 		b.handleCheck(enc, req)
+		return
+	case opContext:
+		_ = enc.Encode(brokerFrame{Type: frameTypeContext, Data: agentContext(b.cfg.Rules, "", "", false)})
 		return
 	default:
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
@@ -681,6 +744,11 @@ func (b *Broker) checkRateLimit() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := time.Now()
+	if b.confirmWindow > 0 {
+		b.confirmHist = slices.DeleteFunc(b.confirmHist, func(t time.Time) bool {
+			return now.Sub(t) > b.confirmWindow
+		})
+	}
 	if len(b.confirmHist) >= rateLimitConfirmsPerSess {
 		return false
 	}
@@ -864,6 +932,30 @@ func (b *Broker) notifyApprover(p *pendingRequest) {
 		summary, body := pendingNotification(p.req.Argv, b.projectDir)
 		notifier(summary, body)
 	}
+}
+
+// peerUID returns the uid of the process on the other end of a unix
+// socket, as the kernel recorded it at connect time.
+func peerUID(conn net.Conn) (int, error) {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return -1, errors.New("not a unix socket")
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return -1, err
+	}
+	var cred *syscall.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil {
+		return -1, err
+	}
+	if credErr != nil {
+		return -1, credErr
+	}
+	return int(cred.Uid), nil
 }
 
 func isClosedConn(err error) bool {

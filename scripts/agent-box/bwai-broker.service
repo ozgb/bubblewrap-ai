@@ -1,0 +1,10 @@
+[Unit]
+Description=bwai host-execution broker for agent users
+
+[Service]
+ExecStart=%h/.local/bin/bwai broker serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
