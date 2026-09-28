@@ -135,6 +135,15 @@ path, so `~/work` qualifies.
   subordinate uid, so it is refused unless listed.
 - **Roots.** `serve.roots` replaces the per-session project dir. It
   checks the request cwd and confines `git-safe push`'s git dir.
+- **Hot reload.** The daemon notices when its config file changes
+  (checked every two seconds) and applies it to requests that start
+  afterwards: rules, `push_allowed_urls`, `protected_branches`,
+  `allowed_uids`, `roots`, the approval timeout. `systemctl --user reload
+  bwai-broker` forces it. A file that fails to parse or validate is
+  logged and the previous config stays in force. Moving `serve.socket`
+  or the web approval address still needs a restart. The per-sandbox
+  broker never reloads: its allowlists are snapshots taken at session
+  start, on purpose.
 - **Confirm cap.** The 30-confirm cap counts over the last hour rather
   than the process lifetime.
 - **Approvals.** A headless box has no desktop notifications. Confirm

@@ -127,6 +127,9 @@ func (p *pendingRequest) resolve(decision string) {
 // approver client) and serializes confirm prompts through a pending
 // queue.
 type Broker struct {
+	// cfg, extraRoots and allowedUIDs can be replaced by reload while
+	// requests are in flight; read them through conf, roots and uids.
+	cfgMu      sync.RWMutex
 	cfg        BrokerConfig
 	projectDir string
 	// extraRoots are additional host directories whose sandbox paths are
@@ -409,9 +412,9 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 	}
 	// Checked after reading the request: closing with it unread would
 	// reset the connection before the client sees the denial.
-	if b.allowedUIDs != nil {
+	if uids := b.uids(); uids != nil {
 		uid, err := peerUID(conn)
-		if err != nil || !slices.Contains(b.allowedUIDs, uid) {
+		if err != nil || !slices.Contains(uids, uid) {
 			b.auditLog.write(auditEntry{Decision: fmt.Sprintf("denied:peer uid %d not allowed", uid)})
 			_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 			return
@@ -427,15 +430,16 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 	case "", opExec:
 		// fall through to the exec path below
 	case opListRules:
-		_ = enc.Encode(brokerFrame{Type: frameTypeRules, Rules: b.cfg.Rules})
+		_ = enc.Encode(brokerFrame{Type: frameTypeRules, Rules: b.conf().Rules})
 		return
 	case opCheck:
 		b.handleCheck(enc, req)
 		return
 	case opContext:
-		ctx := agentContext(b.cfg.Rules, "", "", false)
+		rules := b.conf().Rules
+		ctx := agentContext(rules, "", "", false)
 		if b.daemon {
-			ctx = daemonAgentContext(b.cfg.Rules)
+			ctx = daemonAgentContext(rules)
 		}
 		_ = enc.Encode(brokerFrame{Type: frameTypeContext, Data: ctx})
 		return
@@ -499,7 +503,8 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 // exec and check paths so a dry run cannot drift from what would
 // actually execute.
 func (b *Broker) matchVerdict(argv []string) *matchedRule {
-	action, idx := matchRules(b.cfg.Rules, argv)
+	rules := b.conf().Rules
+	action, idx := matchRules(rules, argv)
 	// "always-this-session" promotes a previously-confirmed argv to
 	// auto_allow for the lifetime of this broker.
 	if action == ActionConfirm && b.isSessionAllowed(argv) {
@@ -507,7 +512,7 @@ func (b *Broker) matchVerdict(argv []string) *matchedRule {
 	}
 	m := &matchedRule{Idx: idx, Action: action}
 	if idx >= 0 {
-		r := b.cfg.Rules[idx]
+		r := rules[idx]
 		m.Rule = &r
 	}
 	return m
@@ -566,7 +571,7 @@ func (b *Broker) awaitApproval(req brokerRequest, verdict *matchedRule, enc *jso
 	select {
 	case d := <-p.decision:
 		return d
-	case <-time.After(time.Duration(b.cfg.ApprovalTimeoutS) * time.Second):
+	case <-time.After(time.Duration(b.conf().ApprovalTimeoutS) * time.Second):
 		// once.Do means whoever fired resolve() first wins — if an
 		// approver decision raced the timer, that decision is already
 		// in the buffered channel. Read it back so we honour it
@@ -598,9 +603,10 @@ func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx in
 	// stray host environment value can never widen it, and so the only
 	// source inside the sandbox is the value captured at session start.
 	if len(req.Argv) > 0 && req.Argv[0] == "git-safe" {
+		cfg := b.conf()
 		cmd.Env = append(cmd.Env,
-			pushAllowedEnv+"="+strings.Join(b.cfg.PushAllowedURLs, "\n"),
-			protectedBranchesEnv+"="+strings.Join(b.cfg.ProtectedBranches, "\n"),
+			pushAllowedEnv+"="+strings.Join(cfg.PushAllowedURLs, "\n"),
+			protectedBranchesEnv+"="+strings.Join(cfg.ProtectedBranches, "\n"),
 			requestCwdEnv+"="+req.Cwd,
 			allowedRootsEnv+"="+strings.Join(b.resolvedRoots(), "\n"),
 		)
@@ -778,11 +784,29 @@ func (b *Broker) pathOutsideRoots(args []string) string {
 	return ""
 }
 
+func (b *Broker) conf() BrokerConfig {
+	b.cfgMu.RLock()
+	defer b.cfgMu.RUnlock()
+	return b.cfg
+}
+
+func (b *Broker) roots() []string {
+	b.cfgMu.RLock()
+	defer b.cfgMu.RUnlock()
+	return b.extraRoots
+}
+
+func (b *Broker) uids() []int {
+	b.cfgMu.RLock()
+	defer b.cfgMu.RUnlock()
+	return b.allowedUIDs
+}
+
 // resolvedRoots is the project dir plus the extra roots, each resolved
 // through symlinks so they compare against resolved request paths.
 func (b *Broker) resolvedRoots() []string {
 	var out []string
-	for _, root := range append([]string{b.projectDir}, b.extraRoots...) {
+	for _, root := range append([]string{b.projectDir}, b.roots()...) {
 		if root == "" {
 			continue
 		}
@@ -968,12 +992,13 @@ func (b *Broker) urlFor(p *pendingRequest) string {
 // nudge. Either way `bwai approve` remains available — this only adds a
 // shortcut, it never gates approval.
 func (b *Broker) notifyApprover(p *pendingRequest) {
-	if b.cfg.webApprove() && b.dbus != nil {
+	cfg := b.conf()
+	if cfg.webApprove() && b.dbus != nil {
 		url := b.urlFor(p)
 		summary, body := webNotification(p.req.Argv, b.projectDir, url)
 		// Action pairs: id, label. "default" fires on body click.
 		actions := []string{"default", "", "approve", "Approve", "deny", "Deny", "open", "Open page"}
-		id, err := b.dbus.Notify(summary, body, url, actions, int32(b.cfg.ApprovalTimeoutS*1000))
+		id, err := b.dbus.Notify(summary, body, url, actions, int32(cfg.ApprovalTimeoutS*1000))
 		if err == nil {
 			b.mu.Lock()
 			p.notifID = id
@@ -983,7 +1008,7 @@ func (b *Broker) notifyApprover(p *pendingRequest) {
 		}
 		// D-Bus send failed — degrade to the oob nudge below.
 	}
-	if b.cfg.oobNotify() {
+	if cfg.oobNotify() {
 		summary, body := pendingNotification(p.req.Argv, b.projectDir)
 		notifier(summary, body)
 	}

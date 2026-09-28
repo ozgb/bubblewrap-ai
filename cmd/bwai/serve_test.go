@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -129,6 +130,69 @@ func TestNewServeBroker(t *testing.T) {
 	if _, err := NewServeBroker(cfg, filepath.Join(t.TempDir(), "audit.log")); err == nil {
 		t.Error("a second broker on a live socket must refuse to start")
 	}
+}
+
+func TestServeHotReload(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := t.TempDir()
+	sock := filepath.Join(t.TempDir(), "broker.sock")
+	path := filepath.Join(t.TempDir(), "bwai.json")
+	write := func(rules string) {
+		t.Helper()
+		body := `{"broker":{"enabled":true,"serve":{"socket":"` + sock + `","allowed_uids":[` +
+			fmt.Sprint(os.Getuid()) + `],"roots":["` + root + `"]},"rules":[` + rules + `]}}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(``)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewServeBroker(cfg.Broker, filepath.Join(t.TempDir(), "audit.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	go b.Serve()
+	hup := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	go watchConfig(b, path, 20*time.Millisecond, hup, done)
+
+	action := func() string {
+		frames := sendRequest(t, sock, brokerRequest{V: 1, Op: opCheck, Argv: []string{"git-sign"}})
+		return frames[0].Matched.Action
+	}
+	waitFor := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(3 * time.Second)
+		for action() != want {
+			if time.Now().After(deadline) {
+				t.Fatalf("action = %q, want %q", action(), want)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	if got := action(); got != ActionAutoDeny {
+		t.Fatalf("before the edit: %q, want auto_deny", got)
+	}
+	write(`{"match":["git-sign"],"action":"auto_allow"}`)
+	waitFor(ActionAutoAllow)
+
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := action(); got != ActionAutoAllow {
+		t.Fatalf("a broken file must leave the previous config in force, got %q", got)
+	}
+
+	write(`{"match":["git-sign"],"action":"confirm"}`)
+	hup <- os.Interrupt
+	waitFor(ActionConfirm)
 }
 
 func TestBroker_ContextOp(t *testing.T) {

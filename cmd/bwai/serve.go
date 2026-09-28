@@ -74,12 +74,86 @@ func runBrokerServe(args []string) int {
 		b.BrokerSocketPath(), strings.Join(uids, ","), strings.Join(cfg.Broker.Serve.Roots, ", "))
 	fmt.Printf("bwai broker: approve with `bwai approve --socket %s`\n", b.ApproveSocketPath())
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sig
+		<-stop
 		_ = b.Close()
 	}()
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	done := make(chan struct{})
+	go watchConfig(b, path, configPollInterval, hup, done)
 	b.Serve()
+	close(done)
 	return 0
+}
+
+const configPollInterval = 2 * time.Second
+
+// watchConfig reloads the daemon's config when the file changes, or on
+// SIGHUP. It polls rather than using inotify: editors replace files by
+// rename, and a stat per interval sees that without re-arming watches.
+func watchConfig(b *Broker, path string, every time.Duration, hup <-chan os.Signal, done <-chan struct{}) {
+	last := fileStamp(path)
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-hup:
+		case <-tick.C:
+			if cur := fileStamp(path); cur == last {
+				continue
+			}
+		}
+		last = fileStamp(path)
+		cfg, err := loadConfig(path)
+		if err == nil {
+			err = b.reload(cfg.Broker)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bwai broker: %s not reloaded, keeping the previous config: %v\n", path, err)
+			continue
+		}
+		fmt.Printf("bwai broker: reloaded %s (%d rules)\n", path, len(cfg.Broker.Rules))
+	}
+}
+
+// fileStamp identifies a version of a file well enough to notice an edit.
+func fileStamp(path string) string {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	st, _ := fi.Sys().(*syscall.Stat_t)
+	var ino uint64
+	if st != nil {
+		ino = st.Ino
+	}
+	return fmt.Sprintf("%d/%d/%d", fi.ModTime().UnixNano(), fi.Size(), ino)
+}
+
+// reload swaps in a new config for requests that start after it. The
+// socket is bound once, so a changed serve.socket (or web address) needs
+// a restart; everything a request consults — rules, push allowlist,
+// protected branches, allowed uids, roots, approval timeout — applies.
+func (b *Broker) reload(cfg BrokerConfig) error {
+	if err := validateServe(cfg.Serve); err != nil {
+		return err
+	}
+	if cfg.ApprovalTimeoutS <= 0 {
+		cfg.ApprovalTimeoutS = defaultApprovalTimeoutSec
+	}
+	b.cfgMu.Lock()
+	defer b.cfgMu.Unlock()
+	if cfg.Serve.Socket != b.cfg.Serve.Socket {
+		return fmt.Errorf("serve.socket changed; restart the broker to move it")
+	}
+	cfg.Web = b.cfg.Web
+	b.cfg = cfg
+	b.extraRoots = cfg.Serve.Roots
+	b.allowedUIDs = cfg.Serve.AllowedUIDs
+	return nil
 }
