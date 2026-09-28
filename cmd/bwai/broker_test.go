@@ -71,8 +71,10 @@ func TestHostArgv(t *testing.T) {
 func newTestBroker(t *testing.T, cfg BrokerConfig, projectDir string, extraRoots ...string) *Broker {
 	t.Helper()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, "bin"), 0o700); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
+	for _, sub := range []string{"bin", "cwd"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, sub), 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", sub, err)
+		}
 	}
 	auditPath := filepath.Join(tmpDir, "broker.log")
 
@@ -172,6 +174,48 @@ func TestBroker_AutoAllow(t *testing.T) {
 	}
 	if exitCode == nil || *exitCode != 0 {
 		t.Errorf("exit code = %v, want 0", exitCode)
+	}
+}
+
+// TestBroker_RunsOutsideTheProject pins the property that stops a planted
+// .git/hooks or .git/config from running on the host: host commands never
+// get the agent's tree as their working directory.
+func TestBroker_RunsOutsideTheProject(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules:   []Rule{{Match: []string{"pwd"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+	frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"pwd"}, Cwd: projectDir,
+	})
+	gotStdout, _, exitCode := collectStreams(t, frames)
+	if exitCode == nil || *exitCode != 0 {
+		t.Fatalf("exit code = %v, want 0", exitCode)
+	}
+	if got, want := strings.TrimSpace(gotStdout), filepath.Join(b.TmpDir(), "cwd"); got != want {
+		t.Fatalf("host command ran in %q, want the broker's empty dir %q", got, want)
+	}
+}
+
+func TestBroker_RejectsCwdSymlinkOutOfProject(t *testing.T) {
+	projectDir := t.TempDir()
+	outside := t.TempDir()
+	link := filepath.Join(projectDir, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules:   []Rule{{Match: []string{"true"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+	frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"true"}, Cwd: link,
+	})
+	if len(frames) != 1 || frames[0].Type != frameTypeDenied || frames[0].Reason != denyReasonInvalid {
+		t.Fatalf("frames = %+v, want a single invalid denial", frames)
 	}
 }
 

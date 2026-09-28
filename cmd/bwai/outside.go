@@ -39,6 +39,8 @@ func runOutsideClient(argv []string) int {
 		return runOutsideListRules(false)
 	case "--check":
 		return runOutsideCheck(argv[1:])
+	case "--stdin":
+		return runOutsideStdin(argv[1:])
 	}
 	return runOutsideExec(argv)
 }
@@ -52,10 +54,14 @@ func runOutsideHelp() int {
 	fmt.Fprintln(os.Stdout, "  bwai-outside <command> [args...]   run on host (subject to broker rules)")
 	fmt.Fprintln(os.Stdout, "  bwai-outside --list-rules          print the rules and exit")
 	fmt.Fprintln(os.Stdout, "  bwai-outside --check <cmd> [args]  dry-run: show which rule would match, run nothing")
+	fmt.Fprintln(os.Stdout, "  bwai-outside --stdin <cmd> [args]  run on host with this process's stdin as its stdin")
 	fmt.Fprintln(os.Stdout, "  bwai-outside --help                this message")
 	fmt.Fprintln(os.Stdout, "")
 	fmt.Fprintln(os.Stdout, "Anything not matched by an allow/confirm rule is denied.")
 	fmt.Fprintln(os.Stdout, "Confirm rules prompt the human on the host via `bwai approve`.")
+	fmt.Fprintln(os.Stdout, "Host commands run in an empty directory, not your project: relative")
+	fmt.Fprintln(os.Stdout, "paths do not resolve there, and gh needs -R owner/repo. Pass file")
+	fmt.Fprintln(os.Stdout, "contents with --stdin, e.g. `bwai-outside --stdin gh issue create -R o/r -t T -F - < body.md`.")
 	fmt.Fprintln(os.Stdout, "")
 	return runOutsideListRules(true)
 }
@@ -192,6 +198,22 @@ func printRules(w io.Writer, rules []Rule) {
 	fmt.Fprintln(w, "  `gh issue -R org/repo create **` instead (typically the AUTO_ALLOW one).")
 	fmt.Fprintln(w, "Not sure which rule fires? `bwai-outside --check <cmd> [args...]` asks the broker dry-run.")
 	fmt.Fprintln(w, "Use `bwai approve` on the host to clear CONFIRM prompts.")
+}
+
+// runOutsideStdin forwards argv with all of stdin attached. Opt-in rather
+// than the default: an agent harness can leave stdin open and idle, and
+// reading it unasked would hang the call.
+func runOutsideStdin(argv []string) int {
+	if len(argv) == 0 {
+		fmt.Fprintf(os.Stderr, "usage: %s --stdin <command> [args...]\n", outsideProg)
+		return 2
+	}
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxRequestBytes))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, outsideProg+": read stdin: %v\n", err)
+		return 127
+	}
+	return outsideExec(argv, data, os.Stdout, os.Stderr)
 }
 
 // runOutsideExec forwards argv to the broker with the caller's stdio.

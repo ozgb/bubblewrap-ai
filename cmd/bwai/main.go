@@ -173,6 +173,9 @@ func runSandbox() int {
 		if startedInWorktree && exposeMain && worktreeMainTree != "" {
 			roots = append(roots, worktreeMainTree)
 		}
+		// A linked worktree's git dirs are bound read-write too, and
+		// git-safe has to read them to find the branch it pushes.
+		roots = append(roots, gitWorktreeDirs(currentDir)...)
 		broker, err = NewBroker(cfg.Broker, currentDir, defaultAuditPath(home), roots...)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: broker init failed: %v\n", err)
@@ -351,6 +354,13 @@ func runSandbox() int {
 	}
 	if len(prepend) > 0 {
 		args = append(args, "--setenv", "PATH", strings.Join(prepend, ":")+":"+os.Getenv("PATH"))
+	}
+	if broker != nil {
+		// Push mirrors run git with host credentials, so their hooks and
+		// config must be out of the agent's reach, whatever home_allow says.
+		if priv := brokerPrivateDir(); os.MkdirAll(priv, 0o700) == nil {
+			args = append(args, tmpfs(priv)...)
+		}
 	}
 	args = append(args, cfg.BwrapExtraArgs...)
 
@@ -596,7 +606,18 @@ including reading, editing, and committing — does *not* need it.
 Use ` + "`bwai-outside`" + ` when the command requires host-only state:
 
 ` + "```sh" + `
-bwai-outside gh pr create   # needs host gh auth
+bwai-outside gh pr create -R owner/repo --head my-branch --title "…" --body "…"
+` + "```" + `
+
+Host commands run in an empty directory on the host, never in your
+project — a repository's hooks and config would otherwise run with the
+host's credentials. So relative paths do not resolve, and ` + "`gh`" + ` cannot
+infer the repository: always pass ` + "`-R owner/repo`" + ` (read it from
+` + "`git remote -v`" + `), and ` + "`--head <branch>`" + ` for ` + "`gh pr create`" + `. To hand a
+command a file's contents, use ` + "`--stdin`" + `:
+
+` + "```sh" + `
+bwai-outside --stdin gh issue create -R owner/repo -t "Title" -F - < body.md
 ` + "```" + `
 
 Commits are signed on the host without any extra step: inside the

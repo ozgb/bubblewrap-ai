@@ -11,77 +11,38 @@ import (
 )
 
 func TestPlanPush(t *testing.T) {
+	const dest = "git@github.com:o/r.git"
+	const sha = "0123456789abcdef0123456789abcdef01234567"
+	push := func(branch string) []string {
+		return []string{"git", "push", dest, sha + ":refs/heads/" + branch}
+	}
 	cases := []struct {
 		name         string
 		branch       string
-		remote       string
 		remoteExists bool
 		fastForward  bool
-		hasUpstream  bool
 		protected    []string
 		want         []string
 		wantErr      bool
 	}{
-		{
-			name:    "detached head is refused",
-			branch:  "",
-			wantErr: true,
-		},
-		{
-			name:    "protected main is refused",
-			branch:  "main",
-			wantErr: true,
-		},
-		{
-			name:    "protected master is refused",
-			branch:  "master",
-			wantErr: true,
-		},
-		{
-			name:    "protected branch is refused even when it does not exist remotely",
-			branch:  "main",
-			wantErr: true,
-		},
+		{name: "detached head is refused", branch: "", wantErr: true},
+		{name: "protected main is refused", branch: "main", wantErr: true},
+		{name: "protected master is refused", branch: "master", wantErr: true},
 		{
 			name:         "non-fast-forward is refused",
 			branch:       "feature",
 			remoteExists: true,
-			fastForward:  false,
-			hasUpstream:  true,
 			wantErr:      true,
 		},
 		{
-			name:         "existing branch fast-forward with upstream",
+			name:         "existing branch fast-forward",
 			branch:       "feature",
 			remoteExists: true,
 			fastForward:  true,
-			hasUpstream:  true,
-			want:         []string{"git", "push", "origin", "HEAD:refs/heads/feature"},
+			want:         push("feature"),
 		},
-		{
-			name:         "existing branch fast-forward without upstream sets it",
-			branch:       "feature",
-			remoteExists: true,
-			fastForward:  true,
-			hasUpstream:  false,
-			want:         []string{"git", "push", "--set-upstream", "origin", "HEAD:refs/heads/feature"},
-		},
-		{
-			name:   "new remote branch is created",
-			branch: "feature",
-			want:   []string{"git", "push", "--set-upstream", "origin", "HEAD:refs/heads/feature"},
-		},
-		{
-			name:   "slash branch name is preserved",
-			branch: "feat/deep-name",
-			want:   []string{"git", "push", "--set-upstream", "origin", "HEAD:refs/heads/feat/deep-name"},
-		},
-		{
-			name:   "an authorised non-origin remote flows into the argv",
-			branch: "feature",
-			remote: "backup",
-			want:   []string{"git", "push", "--set-upstream", "backup", "HEAD:refs/heads/feature"},
-		},
+		{name: "new remote branch is created", branch: "feature", want: push("feature")},
+		{name: "slash branch name is preserved", branch: "feat/deep-name", want: push("feat/deep-name")},
 		{
 			name:      "a configured glob refuses a matching branch",
 			branch:    "release-1.0",
@@ -98,20 +59,16 @@ func TestPlanPush(t *testing.T) {
 			name:      "a branch outside the globs is still pushed",
 			branch:    "feature",
 			protected: []string{"release-*"},
-			want:      []string{"git", "push", "--set-upstream", "origin", "HEAD:refs/heads/feature"},
+			want:      push("feature"),
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			remote := tc.remote
-			if remote == "" {
-				remote = "origin"
-			}
 			protected := tc.protected
 			if protected == nil {
 				protected = defaultProtectedBranches
 			}
-			got, err := planPush(tc.branch, remote, tc.remoteExists, tc.fastForward, tc.hasUpstream, protected)
+			got, err := planPush(tc.branch, "origin", dest, sha, tc.remoteExists, tc.fastForward, protected)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("planPush(%q) = %v, want error", tc.branch, got)
@@ -203,16 +160,16 @@ func TestURLAllowed(t *testing.T) {
 		"https://github.com/CubeB/RWE-B4",
 		"ssh://git@github.com/CubeB/RWE-B4.git",
 	} {
-		if !urlAllowed(normalizeRemoteURL(raw), allowed) {
+		if allowedEntry(normalizeRemoteURL(raw), allowed) == "" {
 			t.Errorf("%q should match the allowlist", raw)
 		}
 	}
 	// A different repository does not, even on the same host.
-	if urlAllowed(normalizeRemoteURL("git@github.com:attacker/exfil.git"), allowed) {
+	if allowedEntry(normalizeRemoteURL("git@github.com:attacker/exfil.git"), allowed) != "" {
 		t.Error("an unrelated repository must not match the allowlist")
 	}
 	// An empty allowlist allows nothing.
-	if urlAllowed(normalizeRemoteURL("git@github.com:CubeB/RWE-B4.git"), nil) {
+	if allowedEntry(normalizeRemoteURL("git@github.com:CubeB/RWE-B4.git"), nil) != "" {
 		t.Error("an empty allowlist must refuse everything")
 	}
 }
@@ -281,6 +238,7 @@ func TestGitSafePushIntegration(t *testing.T) {
 	// Keep the host's git config (push.default, gpg signing, …) out of it.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin.git")
@@ -291,33 +249,71 @@ func TestGitSafePushIntegration(t *testing.T) {
 	gitRun(t, root, "init", "-b", "feature", work)
 	gitRun(t, work, "remote", "add", "origin", origin)
 	gitRun(t, work, "remote", "add", "backup", other)
-	// The broker injects this snapshot; the tests stand in for it. origin is
-	// the only authorised URL unless a subtest widens it.
+	// The broker injects these; the tests stand in for it. origin is the
+	// only authorised URL unless a subtest widens it.
 	t.Setenv(pushAllowedEnv, origin)
+	t.Setenv(requestCwdEnv, work)
+	t.Setenv(allowedRootsEnv, root)
 	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitRun(t, work, "add", "a.txt")
 	gitRun(t, work, "commit", "-m", "a")
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(work); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-
 	t.Run("creates the remote branch", func(t *testing.T) {
 		if code := push(t); code != 0 {
 			t.Fatalf("push exit %d, want 0", code)
 		}
-		if remoteSha(t, work, "origin", "feature") == "" {
-			t.Fatal("origin/feature should exist after the push")
+		if got, want := remoteSha(t, work, "origin", "feature"), headSha(t, work); got != want {
+			t.Fatalf("origin/feature = %q, want HEAD %q", got, want)
 		}
-		if up := strings.TrimSpace(gitRun(t, work, "rev-parse", "--abbrev-ref", "@{u}")); up != "origin/feature" {
-			t.Fatalf("upstream = %q, want origin/feature", up)
+	})
+
+	t.Run("fast-forwards an existing branch", func(t *testing.T) {
+		gitRun(t, work, "commit", "--allow-empty", "-m", "b")
+		if code := push(t); code != 0 {
+			t.Fatalf("push exit %d, want 0", code)
+		}
+		if got, want := remoteSha(t, work, "origin", "feature"), headSha(t, work); got != want {
+			t.Fatalf("origin/feature = %q, want HEAD %q", got, want)
+		}
+	})
+
+	t.Run("never runs the repository's hooks or config", func(t *testing.T) {
+		marker := filepath.Join(root, "pwned")
+		evil := filepath.Join(root, "evil.sh")
+		writeScript(t, evil, "touch "+marker+"\n")
+		hooks := filepath.Join(work, ".git", "hooks")
+		for _, h := range []string{"pre-push", "pre-commit", "post-checkout", "reference-transaction", "post-update"} {
+			writeScript(t, filepath.Join(hooks, h), "touch "+marker+"\n")
+		}
+		gitRun(t, work, "config", "core.hooksPath", hooks)
+		gitRun(t, work, "config", "core.fsmonitor", evil)
+		gitRun(t, work, "config", "core.sshCommand", evil)
+		gitRun(t, work, "config", "uploadpack.packObjectsHook", evil)
+		gitRun(t, work, "config", "filter.x.clean", evil)
+		gitRun(t, work, "config", "filter.x.smudge", evil)
+		gitRun(t, work, "config", "remote.origin.receivepack", evil)
+		if err := os.WriteFile(filepath.Join(work, ".gitattributes"), []byte("* filter=x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, work, "-c", "core.hooksPath=/dev/null", "commit", "--allow-empty", "-m", "c")
+		_ = os.Remove(marker)
+		t.Cleanup(func() {
+			for _, k := range []string{"core.hooksPath", "core.fsmonitor", "core.sshCommand", "uploadpack.packObjectsHook", "filter.x.clean", "filter.x.smudge", "remote.origin.receivepack"} {
+				gitRun(t, work, "config", "--unset", k)
+			}
+			_ = os.Remove(filepath.Join(work, ".gitattributes"))
+		})
+
+		if code := push(t); code != 0 {
+			t.Fatalf("push exit %d, want 0", code)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("pushing ran code planted in the repository")
+		}
+		if got, want := remoteSha(t, work, "origin", "feature"), headSha(t, work); got != want {
+			t.Fatalf("origin/feature = %q, want HEAD %q", got, want)
 		}
 	})
 
@@ -351,7 +347,7 @@ func TestGitSafePushIntegration(t *testing.T) {
 	t.Run("refuses a non-fast-forward", func(t *testing.T) {
 		before := remoteSha(t, work, "origin", "feature")
 		// Rewrite the tip so the remote commit is no longer an ancestor.
-		gitRun(t, work, "commit", "--amend", "-m", "a (amended)")
+		gitRun(t, work, "commit", "--amend", "--allow-empty", "-m", "c (amended)")
 		if code := push(t); code != 1 {
 			t.Fatalf("non-fast-forward push exit %d, want 1", code)
 		}
@@ -360,8 +356,43 @@ func TestGitSafePushIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("refuses a git dir outside the roots", func(t *testing.T) {
+		t.Setenv(allowedRootsEnv, filepath.Join(root, "elsewhere"))
+		if code := push(t); code != 1 {
+			t.Fatalf("out-of-roots push exit %d, want 1", code)
+		}
+	})
+
+	t.Run("refuses a .git pointer out of the roots", func(t *testing.T) {
+		outside := t.TempDir()
+		gitRun(t, outside, "init", "-b", "feature", "victim")
+		linked := filepath.Join(root, "linked")
+		if err := os.MkdirAll(linked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		pointer := "gitdir: " + filepath.Join(outside, "victim", ".git") + "\n"
+		if err := os.WriteFile(filepath.Join(linked, ".git"), []byte(pointer), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(requestCwdEnv, linked)
+		if code := push(t); code != 1 {
+			t.Fatalf("pointer-escape push exit %d, want 1", code)
+		}
+	})
+
+	t.Run("refuses object alternates", func(t *testing.T) {
+		alt := filepath.Join(work, ".git", "objects", "info", "alternates")
+		if err := os.WriteFile(alt, []byte(filepath.Join(origin, "objects")+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(alt) })
+		if code := push(t); code != 1 {
+			t.Fatalf("alternates push exit %d, want 1", code)
+		}
+	})
+
 	t.Run("refuses a protected branch", func(t *testing.T) {
-		gitRun(t, work, "checkout", "-b", "main")
+		gitRun(t, work, "checkout", "-q", "-b", "main")
 		if code := push(t); code != 1 {
 			t.Fatalf("protected-branch push exit %d, want 1", code)
 		}
@@ -369,7 +400,7 @@ func TestGitSafePushIntegration(t *testing.T) {
 
 	t.Run("refuses a configured protected-branch glob", func(t *testing.T) {
 		t.Setenv(protectedBranchesEnv, "release-*")
-		gitRun(t, work, "checkout", "-b", "release-1.0", "main")
+		gitRun(t, work, "checkout", "-q", "-b", "release-1.0", "main")
 		if code := push(t); code != 1 {
 			t.Fatalf("protected-glob push exit %d, want 1", code)
 		}
@@ -379,11 +410,16 @@ func TestGitSafePushIntegration(t *testing.T) {
 	})
 
 	t.Run("refuses a detached HEAD", func(t *testing.T) {
-		gitRun(t, work, "checkout", "--detach")
+		gitRun(t, work, "checkout", "-q", "--detach")
 		if code := push(t); code != 1 {
 			t.Fatalf("detached-head push exit %d, want 1", code)
 		}
 	})
+}
+
+func headSha(t *testing.T, repo string) string {
+	t.Helper()
+	return strings.TrimSpace(gitRun(t, repo, "rev-parse", "HEAD"))
 }
 
 // TestRunGitSafeClient covers the sandbox-side half. It must never

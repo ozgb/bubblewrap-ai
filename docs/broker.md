@@ -326,7 +326,14 @@ three views — list, denial, dry run — share one coordinate system.
 - **Host env, not sandbox env.** Commands run with the *host's* env
   (`$SSH_AUTH_SOCK`, `$GPG_TTY`, etc.), not whatever the sandbox passes.
   Sandbox can't smuggle in `LD_PRELOAD` or hostile `PATH`.
-- **cwd confined** to the project bind mount.
+- **cwd confined** to the project bind mount, checked after resolving
+  symlinks, and **never used as the working directory**. Host commands
+  run in an empty directory under the broker tmpdir; the resolved request
+  cwd reaches wrappers as `BWAI_REQUEST_CWD`. A repository in the agent's
+  tree is agent-controlled code — hooks, `core.fsmonitor`,
+  `core.sshCommand`, filter drivers — and any git a host command runs
+  there executes it with host credentials. Rules that hand git a path
+  into the tree (`git -C`, `--git-dir`, `gh pr checkout`) reopen that.
 - **Rate limit.** Max 1 confirm prompt per 2s, 30 confirms per session.
   Excess requests get `denied: ratelimit`. `auto_allow` is not rate
   limited.
@@ -383,6 +390,15 @@ did not authorize.
 `git-safe push` is closed over its arguments — no flags, no refspecs, at
 most one remote name — and enforces the policy in code:
 
+- never runs git in the agent's repository: it reads HEAD, the
+  gitdir pointer, `commondir` and the remote's URL (`git config --file`,
+  no includes) as files, fetches the branch into a host-owned bare mirror
+  under `~/.local/share/bwai-broker/mirrors/` — upload-pack is designed to
+  be safe against an untrusted repository, and `transfer.fsckObjects` is on
+  — and pushes from the mirror. The mirror's directory is a tmpfs inside
+  the sandbox, since its hooks would run with host credentials;
+- refuses a `.git` symlink, a git dir outside the broker's writable roots
+  (`BWAI_ALLOWED_ROOTS`), and object alternates;
 - refuses a detached HEAD;
 - refuses the protected branches — the built-in `main`, `master`, `trunk`,
   `develop` plus any patterns in `broker.protected_branches` (exact names or
@@ -394,8 +410,11 @@ most one remote name — and enforces the policy in code:
   boundary;
 - fetches the remote tip and requires it to be an **ancestor of HEAD**
   before pushing, so a non-fast-forward update cannot happen;
-- constructs the refspec itself (`HEAD:refs/heads/<branch>`, no `+`
-  prefix, never `--force`), creating the remote branch on first push.
+- constructs the refspec itself (`<sha>:refs/heads/<branch>`, no `+`
+  prefix, never `--force`), pushing to the allowlist entry's own spelling
+  and creating the remote branch on first push;
+- leaves the agent's repository alone afterwards: the sandbox-side client
+  updates the remote-tracking ref and upstream with the sandbox's git.
 
 The allowlist and the protected-branch list are trust anchors, not ordinary
 settings: the broker snapshots both at session start and injects them into

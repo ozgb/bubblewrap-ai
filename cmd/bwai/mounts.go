@@ -248,6 +248,17 @@ func worktreeRootMounts(currentDir string) ([]string, string, error) {
 // as in a normal checkout. The gitdir is only mounted separately in the rare
 // case it lives outside the common dir (relocated/separate gitdir).
 func gitWorktreeMounts(currentDir string) []string {
+	var args []string
+	for _, d := range gitWorktreeDirs(currentDir) {
+		args = append(args, rwBind(d)...)
+	}
+	return args
+}
+
+// gitWorktreeDirs returns the existing git dirs a linked worktree at
+// currentDir depends on: the shared common dir, and its own per-worktree
+// dir when that lives elsewhere. Empty for a main checkout or non-repo.
+func gitWorktreeDirs(currentDir string) []string {
 	dotGit := filepath.Join(currentDir, ".git")
 	info, err := os.Lstat(dotGit)
 	if err != nil || info.IsDir() {
@@ -259,14 +270,14 @@ func gitWorktreeMounts(currentDir string) []string {
 	}
 	commonDir := resolveCommonDir(gitDir)
 
-	var args []string
+	var dirs []string
 	if _, err := os.Stat(commonDir); err == nil {
-		args = append(args, rwBind(commonDir)...)
+		dirs = append(dirs, commonDir)
 	}
 	if !isWithin(commonDir, gitDir) {
 		if _, err := os.Stat(gitDir); err == nil {
-			args = append(args, rwBind(gitDir)...)
+			dirs = append(dirs, gitDir)
 		}
 	}
-	return args
+	return dirs
 }

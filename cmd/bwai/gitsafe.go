@@ -67,8 +67,48 @@ func runGitSafeClient(args []string) int {
 	case "commit":
 		fmt.Fprintln(os.Stderr, gitSafeCommitRemoved)
 		return 2
+	case "push":
+		branch, sha := sandboxHead()
+		code := runOutsideExec(append([]string{"git-safe"}, args...))
+		if code == 0 && branch != "" {
+			recordPush(args[1:], branch, sha)
+		}
+		return code
 	}
 	return runOutsideExec(append([]string{"git-safe"}, args...))
+}
+
+// sandboxHead returns the current branch and its commit, as the sandbox's
+// own git sees them. Empty when HEAD is detached or git fails.
+func sandboxHead() (branch, sha string) {
+	b, err := exec.Command("git", "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+	if err != nil {
+		return "", ""
+	}
+	branch = strings.TrimSpace(string(b))
+	s, err := exec.Command("git", "rev-parse", "--verify", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", ""
+	}
+	return branch, strings.TrimSpace(string(s))
+}
+
+// recordPush updates the sandbox repository after a successful push: the
+// host pushes from its own mirror and never writes to the agent's repo,
+// so the remote-tracking ref and upstream are set here, where running git
+// is the agent's own business. Best-effort: the push has already happened.
+func recordPush(args []string, branch, sha string) {
+	remote := "origin"
+	if len(args) == 1 {
+		remote = args[0]
+	}
+	tracking := "refs/remotes/" + remote + "/" + branch
+	if exec.Command("git", "update-ref", tracking, sha).Run() != nil {
+		return
+	}
+	if exec.Command("git", "rev-parse", "--verify", "--quiet", branch+"@{upstream}").Run() != nil {
+		_ = exec.Command("git", "branch", "--quiet", "--set-upstream-to="+remote+"/"+branch, branch).Run()
+	}
 }
 
 // runGitSafe is the host-side half: the `bwai git-safe …` subcommand,
@@ -97,36 +137,53 @@ func runGitSafe(args []string) int {
 	}
 }
 
-// runGitSafePush implements `git-safe push`. It gathers the facts the
-// policy needs from the repository, then defers the decision to planPush,
-// which is pure and unit-tested.
+// runGitSafePush implements `git-safe push`. It never runs git in the
+// agent's repository, which the agent controls down to its hooks and
+// config. Instead it reads the few facts it needs from the git dir as
+// plain files, pulls the branch into a host-owned mirror (upload-pack is
+// the one git command designed to be safe against an untrusted
+// repository), and pushes from the mirror to the allowlisted URL. The
+// policy decision itself is planPush, which is pure and unit-tested.
 func runGitSafePush(args []string) int {
 	remote, err := planPushRemote(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
 		return 2
 	}
-
-	branch, err := gitOutput("symbolic-ref", "--quiet", "--short", "HEAD")
+	cwd := os.Getenv(requestCwdEnv)
+	if cwd == "" {
+		if cwd, err = os.Getwd(); err != nil {
+			fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
+			return 1
+		}
+	}
+	repo, err := locateRepo(cwd, allowedRoots())
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "git-safe: refusing to push: HEAD is detached (check out a branch first)")
+		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: %v\n", err)
 		return 1
 	}
-	branch = strings.TrimSpace(branch)
+	branch, err := repo.branch()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: %v\n", err)
+		return 1
+	}
 
 	protected, err := protectedBranchPatterns()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
 		return 1
 	}
+	if branchProtected(branch, protected) {
+		fmt.Fprintf(os.Stderr, "git-safe: refusing to push protected branch %q\n", branch)
+		return 1
+	}
 
 	// The sandbox owns .git/config, so a remote name proves nothing: the
-	// push URL it resolves to is what gets authorised, against the
-	// allowlist the broker snapshotted at session start. --push so a
-	// remote.<name>.pushurl is the URL that is checked.
-	rawURL, err := gitOutput("remote", "get-url", "--push", remote)
+	// push URL it resolves to only selects an allowlist entry, and the
+	// entry's own spelling is what gets pushed to.
+	rawURL, err := repo.pushURL(remote)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: no git remote named %q\n", remote)
+		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: %v\n", err)
 		return 1
 	}
 	allowed, err := pushAllowedURLs()
@@ -134,41 +191,65 @@ func runGitSafePush(args []string) int {
 		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
 		return 1
 	}
-	if !urlAllowed(normalizeRemoteURL(rawURL), allowed) {
-		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: remote %q (%s) is not in push_allowed_urls\n",
-			remote, strings.TrimSpace(rawURL))
+	dest := allowedEntry(normalizeRemoteURL(rawURL), allowed)
+	if dest == "" {
+		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: remote %q (%s) is not in push_allowed_urls\n", remote, rawURL)
 		return 1
 	}
 
-	// Does the branch already exist on the remote? `ls-remote --exit-code`
-	// exits non-zero when nothing matched, so a nil error means it does.
-	remoteExists := false
-	fastForward := false
-	if _, err := gitOutput("ls-remote", "--exit-code", remote, "refs/heads/"+branch); err == nil {
-		remoteExists = true
-		// Bring the remote tip local so ancestry is decidable, then
-		// require it to be an ancestor of HEAD. This is what makes a
-		// destructive update impossible rather than merely discouraged.
-		if _, ferr := gitOutput("fetch", "--quiet", remote, "refs/heads/"+branch); ferr != nil {
-			fmt.Fprintf(os.Stderr, "git-safe: cannot fetch %s/%s: %v\n", remote, branch, ferr)
-			return 1
-		}
-		if _, aerr := gitOutput("merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"); aerr == nil {
-			fastForward = true
-		}
+	mirror, err := ensureMirror(dest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git-safe: mirror: %v\n", err)
+		return 1
 	}
-
-	hasUpstream := false
-	if _, err := gitOutput("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"); err == nil {
-		hasUpstream = true
+	incoming := fmt.Sprintf("refs/bwai/incoming/%d", os.Getpid())
+	tracking := fmt.Sprintf("refs/bwai/remote/%d", os.Getpid())
+	defer func() {
+		_, _ = mirrorGit(mirror, "update-ref", "-d", incoming)
+		_, _ = mirrorGit(mirror, "update-ref", "-d", tracking)
+	}()
+	// safe.directory is scoped to this fetch: it lets upload-pack serve a
+	// repository owned by another user (the agent box), and upload-pack
+	// reads that repository without executing anything from it.
+	if out, err := mirrorGit(mirror,
+		"-c", "safe.directory="+repo.commonDir,
+		"-c", "safe.directory="+repo.workTree,
+		"-c", "transfer.fsckObjects=true",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+		repo.commonDir, "+refs/heads/"+branch+":"+incoming); err != nil {
+		fmt.Fprintf(os.Stderr, "git-safe: cannot read branch %q from the repository: %v\n%s", branch, err, out)
+		return 1
 	}
-
-	argv, err := planPush(branch, remote, remoteExists, fastForward, hasUpstream, protected)
+	sha, err := mirrorGit(mirror, "rev-parse", "--verify", incoming)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
 		return 1
 	}
-	return execGit(argv)
+	sha = strings.TrimSpace(sha)
+
+	remoteExists, fastForward := false, false
+	if _, err := mirrorGit(mirror, "ls-remote", "--exit-code", dest, "refs/heads/"+branch); err == nil {
+		remoteExists = true
+		if out, ferr := mirrorGit(mirror, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+			dest, "+refs/heads/"+branch+":"+tracking); ferr != nil {
+			fmt.Fprintf(os.Stderr, "git-safe: cannot fetch %s/%s: %v\n%s", remote, branch, ferr, out)
+			return 1
+		}
+		if _, aerr := mirrorGit(mirror, "merge-base", "--is-ancestor", tracking, sha); aerr == nil {
+			fastForward = true
+		}
+	}
+
+	argv, err := planPush(branch, remote, dest, sha, remoteExists, fastForward, protected)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
+		return 1
+	}
+	if code := execGit(mirror, argv); code != 0 {
+		return code
+	}
+	fmt.Printf("git-safe: pushed %s to %s/%s\n", sha[:12], remote, branch)
+	return 0
 }
 
 // remoteNameRe matches the remote names git accepts. Anchored on an
@@ -195,17 +276,17 @@ func planPushRemote(args []string) (string, error) {
 }
 
 // planPush is the entire policy, kept pure so it can be tested without a
-// repository. It returns the exact argv to run, or an error explaining the
-// refusal.
+// repository. It returns the exact argv to run in the mirror, or an error
+// explaining the refusal.
 //
-//	remote       — the remote to push to, whose URL the caller has already
-//	               authorised against push_allowed_urls
-//	remoteExists — the remote already has refs/heads/<branch>
-//	fastForward  — the remote's tip is an ancestor of HEAD (only consulted
-//	               when remoteExists is true)
-//	hasUpstream  — the local branch already tracks a remote branch
+//	remote       — the agent's remote name, for messages only
+//	dest         — the allowlist entry the remote's push URL matched
+//	sha          — the commit being published, already in the mirror
+//	remoteExists — dest already has refs/heads/<branch>
+//	fastForward  — dest's tip is an ancestor of sha (only consulted when
+//	               remoteExists is true)
 //	protected    — branch names/globs that may never be pushed
-func planPush(branch, remote string, remoteExists, fastForward, hasUpstream bool, protected []string) ([]string, error) {
+func planPush(branch, remote, dest, sha string, remoteExists, fastForward bool, protected []string) ([]string, error) {
 	if branch == "" {
 		return nil, fmt.Errorf("refusing to push: no branch is checked out")
 	}
@@ -215,17 +296,11 @@ func planPush(branch, remote string, remoteExists, fastForward, hasUpstream bool
 	if remoteExists && !fastForward {
 		return nil, fmt.Errorf("refusing to push %q: %s/%s is not an ancestor of HEAD (fetch and merge or rebase first)", branch, remote, branch)
 	}
-
-	argv := []string{"git", "push"}
-	if !hasUpstream {
-		argv = append(argv, "--set-upstream")
-	}
 	// The refspec is constructed here: no "+" prefix, no "--force", and no
 	// way for the caller to name a different source or destination.
 	// Combined with the ancestry check above, a non-fast-forward push
 	// cannot happen.
-	argv = append(argv, remote, "HEAD:refs/heads/"+branch)
-	return argv, nil
+	return []string{"git", "push", dest, sha + ":refs/heads/" + branch}, nil
 }
 
 // pushAllowedEnv carries the broker's push-allowlist snapshot to the
@@ -281,15 +356,16 @@ func normalizeRemoteURL(raw string) string {
 	return strings.ToLower(host) + "/" + path
 }
 
-// urlAllowed reports whether norm is in the allowlist, normalising each
-// entry the same way so the two sides need not be spelled alike.
-func urlAllowed(norm string, allowed []string) bool {
+// allowedEntry returns the allowlist entry that normalises to norm, or "".
+// Each entry is normalised the same way, so the two sides need not be
+// spelled alike.
+func allowedEntry(norm string, allowed []string) string {
 	for _, a := range allowed {
 		if normalizeRemoteURL(a) == norm {
-			return true
+			return a
 		}
 	}
-	return false
+	return ""
 }
 
 // protectedBranchesEnv carries the broker's configured protected-branch
@@ -334,17 +410,20 @@ func branchProtected(branch string, patterns []string) bool {
 	return false
 }
 
-// gitOutput runs git and returns its combined output. Callers only care
-// whether it succeeded.
-func gitOutput(args ...string) (string, error) {
-	out, err := exec.Command("git", args...).CombinedOutput()
+// mirrorGit runs git in the host-owned mirror and returns its combined
+// output.
+func mirrorGit(mirror string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = mirror
+	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
-// execGit runs the argv produced by planPush with the caller's stdio,
-// streaming output as a normal shell would, and propagates the exit code.
-func execGit(argv []string) int {
+// execGit runs argv in dir with the caller's stdio, streaming output as a
+// normal shell would, and propagates the exit code.
+func execGit(dir string, argv []string) int {
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

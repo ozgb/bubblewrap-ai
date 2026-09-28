@@ -161,9 +161,10 @@ func NewBroker(cfg BrokerConfig, projectDir string, auditPath string, extraRoots
 	if err := os.Chmod(tmpDir, 0o700); err != nil {
 		return nil, fmt.Errorf("chmod tmpdir: %w", err)
 	}
-	binDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create bin dir: %w", err)
+	for _, sub := range []string{"bin", "cwd"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, sub), 0o700); err != nil {
+			return nil, fmt.Errorf("create %s dir: %w", sub, err)
+		}
 	}
 
 	brokerSock := filepath.Join(tmpDir, "broker.sock")
@@ -373,11 +374,13 @@ func (b *Broker) handleBrokerConn(conn net.Conn) {
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
 	}
-	if !b.cwdAllowed(req.Cwd) {
+	resolved, ok := b.resolveCwd(req.Cwd)
+	if !ok {
 		b.auditLog.write(auditEntry{Argv: req.Argv, Cwd: req.Cwd, Decision: "denied:" + denyReasonInvalid})
 		_ = enc.Encode(brokerFrame{Type: frameTypeDenied, Reason: denyReasonInvalid})
 		return
 	}
+	req.Cwd = resolved
 
 	verdict := b.matchVerdict(req.Argv)
 	action, idx := verdict.Action, verdict.Idx
@@ -504,7 +507,9 @@ func (b *Broker) awaitApproval(req brokerRequest, verdict *matchedRule, enc *jso
 func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx int, decision string) {
 	argv := hostArgv(req.Argv)
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = req.Cwd
+	// Never the agent's tree: a repository there carries hooks and config
+	// that any git the command runs would execute with host credentials.
+	cmd.Dir = filepath.Join(b.tmpDir, "cwd")
 	cmd.Env = os.Environ() // host env, not sandbox env
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
@@ -517,6 +522,8 @@ func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx in
 		cmd.Env = append(cmd.Env,
 			pushAllowedEnv+"="+strings.Join(b.cfg.PushAllowedURLs, "\n"),
 			protectedBranchesEnv+"="+strings.Join(b.cfg.ProtectedBranches, "\n"),
+			requestCwdEnv+"="+req.Cwd,
+			allowedRootsEnv+"="+strings.Join(b.resolvedRoots(), "\n"),
 		)
 	}
 
@@ -638,27 +645,34 @@ func hostArgv(argv []string) []string {
 // hostSubcommands are the argv[0] names hostArgv resolves to this binary.
 var hostSubcommands = map[string]bool{"git-safe": true, "git-sign": true}
 
-// cwdAllowed enforces that the request runs inside the project bind
-// mount. Symlinks inside the sandbox could let a malicious agent steer
-// us elsewhere; check against the cleaned, absolute path.
-func (b *Broker) cwdAllowed(cwd string) bool {
+// resolveCwd checks that a request cwd lies inside the project or one of
+// the extra roots, after resolving symlinks — the agent can plant a link
+// in its tree that points anywhere on the host — and returns the resolved
+// path.
+func (b *Broker) resolveCwd(cwd string) (string, bool) {
 	if !filepath.IsAbs(cwd) {
-		return false
+		return "", false
 	}
-	roots := append([]string{b.projectDir}, b.extraRoots...)
-	for _, root := range roots {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", false
+	}
+	return resolved, withinAny(resolved, b.resolvedRoots())
+}
+
+// resolvedRoots is the project dir plus the extra roots, each resolved
+// through symlinks so they compare against resolved request paths.
+func (b *Broker) resolvedRoots() []string {
+	var out []string
+	for _, root := range append([]string{b.projectDir}, b.extraRoots...) {
 		if root == "" {
 			continue
 		}
-		rel, err := filepath.Rel(root, filepath.Clean(cwd))
-		if err != nil {
-			continue
-		}
-		if rel == "." || !strings.HasPrefix(rel, "..") {
-			return true
+		if r, err := filepath.EvalSymlinks(root); err == nil {
+			out = append(out, r)
 		}
 	}
-	return false
+	return out
 }
 
 // checkRateLimit enforces both the inter-confirm minimum interval and
