@@ -89,6 +89,15 @@ systemctl --user enable --now bwai-broker
 `gh`, `git` and whatever else your rules name must be on the broker
 user's host `PATH`, not only inside a toolbox.
 
+To give the broker its own GitHub token rather than your usual
+credentials, install `scripts/agent-box/github-token.conf` as a drop-in
+(`~/.config/systemd/user/bwai-broker.service.d/`) and write
+`GH_TOKEN=<token>` to `~/.config/bwai/gh-token.env` with mode `0600`.
+`gh` reads `GH_TOKEN`, and git's credential helpers are reset to
+`gh auth git-credential` for the broker only. Keep the token as narrow
+as the forge allows: a fine-grained PAT limited to the repositories, or
+for public repositories a classic PAT with only `public_repo`.
+
 ## Using it
 
 `ssh agent@box` gets the agent a real login session (the setup copies
