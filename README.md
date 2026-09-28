@@ -417,7 +417,7 @@ For a machine dedicated to agents, `bwai broker serve` runs the broker as a long
 
 ### Telling the agent it can call `bwai-outside`
 
-The sandbox is a fresh world — agents need a way to discover `bwai-outside`. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Claude Code and Command Code opt in with a flag or mod, opencode uses a config environment variable, and Codex loads an isolated overlay at `~/.codex/AGENTS.md`; `bwai` does not modify the host's agent configuration.
+The sandbox is a fresh world — agents need a way to discover `bwai-outside`. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Claude Code and Command Code opt in with a flag or mod, and opencode and Codex load an isolated overlay at their global `AGENTS.md`; `bwai` does not modify the host's agent configuration.
 
 **Command Code** reads system-prompt extensions from mods, so `bwai` exposes a tiny mod at `/run/bwai/bwai.ts` that appends the fragment. Start it with:
 
@@ -446,9 +446,7 @@ The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the sing
 
     Claude reads `/run/bwai/CLAUDE.md` as part of its memory bootstrap and learns it can call `bwai-outside`.
 
-**opencode** needs no opt-in. When the broker is enabled `bwai` exposes a tiny config at `/run/bwai/opencode.json` and sets `OPENCODE_CONFIG` to it, so opencode loads the fragment through its [`instructions`](https://opencode.ai/docs/config/#instructions) option at startup. The env var is a config *override* — your `~/.config/opencode/opencode.json` and the project config still load, and their `instructions` are merged.
-
-Note: opencode v2 accepts `instructions` but does not load its entries; on v2, drop the fragment into an `AGENTS.md` instead.
+**opencode** needs no opt-in. When the broker is enabled `bwai` overlays a merged `~/.config/opencode/AGENTS.md` inside the sandbox: your host global instructions followed by the bwai fragment. opencode v2 loads instructions only from `AGENTS.md` — it accepts the config `instructions` field but never resolves it — so the overlay is what actually reaches the model. The host file and the project tree are not touched.
 
 Inside the sandbox, the agent (or you) can always check what's allowed:
 

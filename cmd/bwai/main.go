@@ -191,18 +191,13 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
-		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot, worktreeMainTree, exposeMain); err != nil {
+		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot, worktreeMainTree, opencodeAgentsPath(home), exposeMain); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: install agent memory: %v\n", err)
 			_ = broker.Close()
 			return 1
 		}
 		if err := installBwaiMod(broker.TmpDir()); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: install command-code mod: %v\n", err)
-			_ = broker.Close()
-			return 1
-		}
-		if err := installOpencodeConfig(broker.TmpDir()); err != nil {
-			fmt.Fprintf(os.Stderr, "bwai: install opencode config: %v\n", err)
 			_ = broker.Close()
 			return 1
 		}
@@ -216,7 +211,7 @@ func runSandbox() int {
 		stopWatch := make(chan struct{})
 		defer close(stopWatch)
 		reload := sessionReloader(broker, configPath, localPath, localState == localApplied, func(bc BrokerConfig) {
-			_ = installAgentMemoryFile(broker.TmpDir(), bc.Rules, worktreeRoot, worktreeMainTree, exposeMain)
+			_ = installAgentMemoryFile(broker.TmpDir(), bc.Rules, worktreeRoot, worktreeMainTree, opencodeAgentsPath(home), exposeMain)
 		})
 		go watchConfig([]string{configPath, localPath, trustStorePath()}, configPollInterval, nil, stopWatch, reload,
 			func(msg string, ok bool) {
@@ -249,6 +244,9 @@ func runSandbox() int {
 		fmt.Println("bwai: broker enabled — sandbox can call `bwai-outside <cmd>`; `bwai-outside --help` lists rules.")
 		if !codexHomeWritable(codexHomePath(home, currentDir, cfg), home, currentDir, stateRoot, cfg) {
 			fmt.Println("bwai: Codex broker guidance not mounted because CODEX_HOME is read-only; add it to home_allow or place it under the project/state_root.")
+		}
+		if !opencodeAgentsMountable(filepath.Dir(opencodeAgentsPath(home)), home, cfg) {
+			fmt.Println("bwai: opencode broker guidance not mounted because ~/.config/opencode is missing or read-only; add it to home_allow.")
 		}
 		if url := broker.WebURL(); url != "" {
 			fmt.Printf("bwai: web approval enabled on %s — per-request links arrive via desktop notification.\n", url)
@@ -342,10 +340,18 @@ func runSandbox() int {
 			"--ro-bind", helper, "/run/bwai/bin/bwai-gpg",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bwai.ts"), "/run/bwai/bwai.ts",
-			"--ro-bind", filepath.Join(broker.TmpDir(), "opencode.json"), "/run/bwai/opencode.json",
-			"--setenv", "OPENCODE_CONFIG", "/run/bwai/opencode.json",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
 		)
+		// opencode v2 accepts the config `instructions` field but never
+		// resolves it; the only path that reaches the model is an AGENTS.md,
+		// and the global one it reads is ~/.config/opencode/AGENTS.md. Overlay
+		// a merged file (host instructions + broker fragment) so the host's
+		// own config is neither written to nor shadowed.
+		if opencodeAgents := opencodeAgentsPath(home); opencodeAgentsMountable(filepath.Dir(opencodeAgents), home, cfg) {
+			args = append(args,
+				"--ro-bind", filepath.Join(broker.TmpDir(), "OPENCODE_AGENTS.md"), opencodeAgents,
+			)
+		}
 		args = append(args, sandboxGitConfigEnv()...)
 		// Codex automatically loads AGENTS.md from CODEX_HOME. Overlay the
 		// generated broker guidance there rather than replacing the project's
@@ -439,6 +445,33 @@ func runSandbox() int {
 		return 1
 	}
 	return 0
+}
+
+// opencodeAgentsPath is the global AGENTS.md opencode v2 reads for
+// instructions inside the sandbox. bwai does not pass XDG_CONFIG_HOME
+// through by default, so opencode resolves the XDG default under HOME.
+func opencodeAgentsPath(home string) string {
+	return filepath.Join(home, ".config", "opencode", "AGENTS.md")
+}
+
+// opencodeAgentsMountable reports whether the sandbox can expose the merged
+// AGENTS.md at dir/AGENTS.md. bwrap cannot create a mountpoint under a
+// read-only parent, so the file must already exist or its directory must be
+// writable in the sandbox (home_allow names it as a sub-path). A missing
+// directory under the read-only home overlay cannot be created at all.
+func opencodeAgentsMountable(dir, home string, cfg Config) bool {
+	if info, err := os.Stat(filepath.Join(dir, "AGENTS.md")); err == nil && !info.IsDir() {
+		return true
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	rel, err := filepath.Rel(home, dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	return slices.Contains(cfg.HomeAllow, filepath.ToSlash(rel))
 }
 
 // codexHomePath resolves the directory Codex will use in the sandbox. A
@@ -759,7 +792,9 @@ func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
 // tmpdir. It's bind-mounted into the sandbox at /run/bwai/CLAUDE.md,
 // where Claude Code picks it up via `--add-dir /run/bwai`, and where the
 // command-code mod below reads it. A copy is installed as ~/.codex/AGENTS.md
-// inside the sandbox so Codex loads it as global instructions.
+// inside the sandbox so Codex loads it as global instructions, and a merge
+// of the host's global AGENTS.md with the fragment is installed for
+// opencode at opencodeAgents.
 //
 // The live rule set is rendered into the fragment so every agent that
 // loads it knows what the broker will and won't run before its first
@@ -773,12 +808,15 @@ func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
 // don't create one on the ephemeral overlay and lose it. mainTree is
 // set only for sessions that started in a linked worktree ("" for main
 // checkouts) and selects the writable-paths wording via exposeMain.
-func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree string, exposeMain bool) error {
+func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree, opencodeAgents string, exposeMain bool) error {
 	content := []byte(agentContext(rules, worktreeRoot, mainTree, exposeMain))
 	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), content, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644); err != nil {
+		return err
+	}
+	return installOpencodeAgents(tmpDir, opencodeAgents, content)
 }
 
 const sandboxIntro = `This shell runs inside a bwai sandbox. The project working tree is
@@ -857,22 +895,21 @@ func installBwaiMod(tmpDir string) error {
 	return os.WriteFile(filepath.Join(tmpDir, "bwai.ts"), []byte(bwaiModContent), 0o644)
 }
 
-// The config fragment passed to opencode via OPENCODE_CONFIG. The
-// instructions field points at the read-only /run/bwai mount, keeping
-// CLAUDE.md the single source of truth shared with Claude Code and
-// command-code.
-const opencodeConfigContent = `{
-	"$schema": "https://opencode.ai/config.json",
-	"instructions": ["/run/bwai/CLAUDE.md"]
-}
-`
-
-// installOpencodeConfig writes the OPENCODE_CONFIG fragment into the
-// broker tmpdir. bwai sets OPENCODE_CONFIG inside the sandbox, so
-// opencode picks up the bwai context at startup without any flag, and
-// without bwai writing to the agent's own config.
-func installOpencodeConfig(tmpDir string) error {
-	return os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(opencodeConfigContent), 0o644)
+// installOpencodeAgents writes the global AGENTS.md that opencode v2 reads
+// for instructions. v2 accepts the config `instructions` field but never
+// resolves it, so AGENTS.md is the only path that reaches the model. The
+// host's own global instructions are preserved and the broker fragment
+// appended; when the host file is already a bwai fragment (as
+// bwai-refresh-context leaves it on an agent box) the fresh fragment
+// replaces it rather than duplicating.
+func installOpencodeAgents(tmpDir, hostAgents string, fragment []byte) error {
+	merged := fragment
+	if host, err := os.ReadFile(hostAgents); err == nil {
+		if existing := strings.TrimSpace(string(host)); existing != "" && !strings.HasPrefix(existing, "# bwai broker") {
+			merged = append(append([]byte(host), '\n', '\n'), fragment...)
+		}
+	}
+	return os.WriteFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"), merged, 0o644)
 }
 
 // installBwaiOutsideHelper places a copy of the running bwai binary

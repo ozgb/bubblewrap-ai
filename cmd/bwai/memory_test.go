@@ -13,7 +13,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 		{Match: []string{"git-safe", "push"}, Action: ActionConfirm},
 		{Match: []string{"gh", "pr", "create", "**"}, Action: ActionConfirm},
 	}
-	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees", "", true); err != nil {
+	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees", "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -101,7 +101,7 @@ func TestCodexHomeWritable(t *testing.T) {
 // be absent rather than advertising a path that does not exist.
 func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil, "", "", true); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, "", "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -115,7 +115,7 @@ func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
 
 func TestInstallAgentMemoryFileNoRules(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil, "", "", true); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, "", "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -153,22 +153,63 @@ func TestRenderWorktreeSectionWorktreeStart(t *testing.T) {
 	}
 }
 
-func TestInstallOpencodeConfig(t *testing.T) {
+func TestInstallOpencodeAgents(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installOpencodeConfig(tmpDir); err != nil {
-		t.Fatalf("installOpencodeConfig: %v", err)
+	host := filepath.Join(t.TempDir(), "AGENTS.md")
+	if err := os.WriteFile(host, []byte("# host instructions\nkeep me\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(tmpDir, "opencode.json"))
+	if err := installOpencodeAgents(tmpDir, host, []byte("# bwai broker\nrules\n")); err != nil {
+		t.Fatalf("installOpencodeAgents: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(got)
-	// The fragment is passed to opencode via OPENCODE_CONFIG; its
-	// instructions must point at the shared read-only context mount.
-	for _, want := range []string{"/run/bwai/CLAUDE.md", "instructions"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("opencode.json missing %q:\n%s", want, s)
-		}
+	// opencode v2 reads only AGENTS.md, so the host's own global
+	// instructions must survive alongside the broker fragment.
+	if s := string(got); !strings.Contains(s, "keep me") || !strings.Contains(s, "# bwai broker") {
+		t.Errorf("merged AGENTS.md missing host or broker content:\n%s", s)
+	}
+	// On an agent box the host file is already a bwai fragment
+	// (bwai-refresh-context); the fresh fragment replaces it, no duplicate.
+	if err := os.WriteFile(host, []byte("# bwai broker\nstale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installOpencodeAgents(tmpDir, host, []byte("# bwai broker\nfresh\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(got); strings.Contains(s, "stale") || !strings.Contains(s, "fresh") {
+		t.Errorf("agent-box AGENTS.md should be replaced, not merged:\n%s", s)
+	}
+}
+
+func TestOpencodeAgentsMountable(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	// A writable home_allow sub-path lets bwrap create the mountpoint.
+	if !opencodeAgentsMountable(dir, home, cfg) {
+		t.Fatal("allowed opencode dir should be mountable")
+	}
+	// A missing directory under the read-only home overlay cannot host one.
+	if opencodeAgentsMountable(filepath.Join(home, ".config", "absent"), home, cfg) {
+		t.Fatal("missing dir should not be mountable")
+	}
+	// An existing file is a mountpoint even when the parent is read-only.
+	if err := os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.HomeAllow = nil
+	if !opencodeAgentsMountable(dir, home, cfg) {
+		t.Fatal("existing AGENTS.md should be mountable")
 	}
 }
 
