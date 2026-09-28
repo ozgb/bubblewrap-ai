@@ -243,92 +243,6 @@ func TestBranchProtected(t *testing.T) {
 	}
 }
 
-func TestPlanCommit(t *testing.T) {
-	cases := []struct {
-		name    string
-		args    []string
-		want    []string
-		wantErr bool
-	}{
-		{
-			name:    "no message",
-			args:    nil,
-			wantErr: true,
-		},
-		{
-			name:    "dangling -m",
-			args:    []string{"-m"},
-			wantErr: true,
-		},
-		{
-			name:    "amend is refused",
-			args:    []string{"-m", "fix", "--amend"},
-			wantErr: true,
-		},
-		{
-			name:    "staging shorthand is refused",
-			args:    []string{"-a", "-m", "fix"},
-			wantErr: true,
-		},
-		{
-			name:    "signing is not the caller's choice",
-			args:    []string{"--no-gpg-sign", "-m", "fix"},
-			wantErr: true,
-		},
-		{
-			name:    "pathspec is refused",
-			args:    []string{"-m", "fix", "a.txt"},
-			wantErr: true,
-		},
-		{
-			name:    "message file is refused",
-			args:    []string{"-F", "-"},
-			wantErr: true,
-		},
-		{
-			name: "single message",
-			args: []string{"-m", "fix bug"},
-			want: []string{"git", "commit", "-S", "-m", "fix bug"},
-		},
-		{
-			name: "repeated -m adds paragraphs",
-			args: []string{"-m", "subject", "-m", "body"},
-			want: []string{"git", "commit", "-S", "-m", "subject", "-m", "body"},
-		},
-		{
-			name: "multiline message is one argument",
-			args: []string{"-m", "subject\n\nbody"},
-			want: []string{"git", "commit", "-S", "-m", "subject\n\nbody"},
-		},
-		{
-			name: "a message that looks like a flag stays a message",
-			args: []string{"-m", "--amend"},
-			want: []string{"git", "commit", "-S", "-m", "--amend"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := planCommit(tc.args)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("planCommit(%v) = %v, want error", tc.args, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Fatalf("planCommit(%v) = %v, want %v", tc.args, got, tc.want)
-			}
-			// The whole point: signing is not the caller's choice.
-			if !slices.Contains(got, "-S") {
-				t.Fatalf("planned argv is not signed: %v", got)
-			}
-		})
-	}
-}
-
 func TestRunGitSafeArgs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -342,9 +256,9 @@ func TestRunGitSafeArgs(t *testing.T) {
 		// Only argv shapes that fail before any git process is started
 		// belong here — a valid `commit -m x` would commit in the test's
 		// own working copy.
-		{"commit without a message", []string{"commit"}, 2},
-		{"commit with an amend", []string{"commit", "-m", "fix", "--amend"}, 2},
-		{"commit with a pathspec", []string{"commit", "-m", "fix", "a.txt"}, 2},
+		// A well-formed commit is refused before any git process starts:
+		// the host must never run git commit in the agent's repository.
+		{"commit is retired", []string{"commit", "-m", "fix"}, 2},
 		{"help", []string{"--help"}, 0},
 	}
 	for _, tc := range cases {
@@ -486,6 +400,7 @@ func TestRunGitSafeClient(t *testing.T) {
 		{"no subcommand", nil, 2},
 		{"help is answered locally", []string{"--help"}, 0},
 		{"forwarding without a broker fails", []string{"push"}, 127},
+		{"commit is answered locally", []string{"commit", "-m", "x"}, 2},
 		{"unknown subcommand still forwards", []string{"force-push"}, 127},
 	}
 	for _, tc := range cases {
@@ -544,115 +459,6 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	return string(data)
-}
-
-// TestGitSafeCommitIntegration drives `git-safe commit` against a real
-// repository. The wrapper always signs, so the test installs a stub
-// gpg.program: git commit -S pipes the commit buffer to the program and
-// embeds whatever carries the PGP markers back out. That keeps the test
-// hermetic — no real keyring, no key generation.
-func TestGitSafeCommitIntegration(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
-
-	root := t.TempDir()
-	work := filepath.Join(root, "work")
-	gitRun(t, root, "init", "-b", "feature", work)
-
-	gpg := filepath.Join(root, "fake-gpg")
-	// git -S reads the detached signature from stdout and, on recent git,
-	// insists on the [GNUPG:] SIG_CREATED status line on stderr before it
-	// will accept it. The payload is not verified, so a marker pair and a
-	// status line are all the stub needs.
-	stub := "#!/bin/sh\n" +
-		"cat >/dev/null\n" +
-		"echo '-----BEGIN PGP SIGNATURE-----'\n" +
-		"echo\n" +
-		"echo dGVzdA==\n" +
-		"echo '-----END PGP SIGNATURE-----'\n" +
-		"echo '[GNUPG:] SIG_CREATED D 1 8 00 1700000000 0123456789ABCDEF0123456789ABCDEF01234567' >&2\n"
-	if err := os.WriteFile(gpg, []byte(stub), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	gitRun(t, work, "config", "gpg.program", gpg)
-	gitRun(t, work, "config", "user.signingkey", "test")
-	gitRun(t, work, "config", "user.name", "Test")
-	gitRun(t, work, "config", "user.email", "test@example.com")
-
-	// Stage a file, then hand control to the wrapper.
-	stage := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(work, name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		gitRun(t, work, "add", name)
-	}
-
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(work); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
-
-	commit := func(args ...string) int {
-		t.Helper()
-		var code int
-		silenceStdio(t, func() { code = runGitSafeCommit(args) })
-		return code
-	}
-
-	t.Run("commits staged changes, signed", func(t *testing.T) {
-		stage("a.txt", "a\n")
-		if code := commit("-m", "subject", "-m", "body"); code != 0 {
-			t.Fatalf("commit exit %d, want 0", code)
-		}
-		if n := strings.TrimSpace(gitRun(t, work, "rev-list", "--count", "HEAD")); n != "1" {
-			t.Fatalf("commit count = %s, want 1", n)
-		}
-		// -S reached git: the commit object carries a gpgsig header.
-		if obj := gitRun(t, work, "cat-file", "-p", "HEAD"); !strings.Contains(obj, "gpgsig") {
-			t.Fatalf("commit is not signed:\n%s", obj)
-		}
-		// Repeated -m became paragraphs, as git would have.
-		if msg := gitRun(t, work, "log", "-1", "--format=%B"); !strings.Contains(msg, "subject\n\nbody") {
-			t.Fatalf("commit message = %q, want the two paragraphs", msg)
-		}
-	})
-
-	t.Run("refuses a message-less commit", func(t *testing.T) {
-		stage("b.txt", "b\n")
-		if code := commit(); code != 2 {
-			t.Fatalf("commit exit %d, want 2", code)
-		}
-	})
-
-	t.Run("refuses --amend", func(t *testing.T) {
-		if code := commit("-m", "rewrite", "--amend"); code != 2 {
-			t.Fatalf("commit exit %d, want 2", code)
-		}
-		if msg := gitRun(t, work, "log", "-1", "--format=%s"); !strings.Contains(msg, "subject") {
-			t.Fatalf("HEAD moved despite the refusal: %q", msg)
-		}
-	})
-
-	t.Run("refuses a pathspec", func(t *testing.T) {
-		if code := commit("-m", "just a.txt", "a.txt"); code != 2 {
-			t.Fatalf("commit exit %d, want 2", code)
-		}
-	})
-
-	t.Run("refuses a detached HEAD", func(t *testing.T) {
-		gitRun(t, work, "checkout", "--detach")
-		if code := commit("-m", "orphan"); code != 1 {
-			t.Fatalf("detached-head commit exit %d, want 1", code)
-		}
-	})
 }
 
 // push runs `git-safe push` with stdio silenced so the sandbox-facing

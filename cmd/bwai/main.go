@@ -18,7 +18,7 @@ func main() {
 	// argv[0]; name the client after whichever one was invoked so its
 	// errors are not reported under the other's name.
 	prog := filepath.Base(os.Args[0])
-	if prog == "bwai-outside" || prog == "git-safe" {
+	if prog == "bwai-outside" || prog == "git-safe" || prog == "bwai-gpg" {
 		outsideProg = prog
 	}
 	// argv[0] dispatch: when bwai is invoked as `bwai-outside` from
@@ -35,6 +35,11 @@ func main() {
 	if prog == "git-safe" {
 		os.Exit(runGitSafeClient(os.Args[1:]))
 	}
+	// `bwai-gpg` is git's signing program inside the sandbox; it forwards
+	// the buffer to the host's `bwai git-sign`.
+	if prog == "bwai-gpg" {
+		os.Exit(runGpgShim(os.Args[1:]))
+	}
 	// Host-side subcommand dispatch. Only the leading positional —
 	// flag args (`--command`, `-c`, `--version`, etc.) still belong to
 	// the default sandbox flow.
@@ -50,6 +55,8 @@ func main() {
 			// which is what replaced the old ~/.local/bin/git-safe
 			// symlink.
 			os.Exit(runGitSafe(os.Args[2:]))
+		case "git-sign":
+			os.Exit(runGitSign(os.Args[2:]))
 		}
 	}
 	os.Exit(runSandbox())
@@ -307,12 +314,14 @@ func runSandbox() int {
 			"--bind", broker.BrokerSocketPath(), "/run/bwai/broker.sock",
 			"--ro-bind", helper, "/run/bwai/bin/bwai-outside",
 			"--ro-bind", helper, "/run/bwai/bin/git-safe",
+			"--ro-bind", helper, "/run/bwai/bin/bwai-gpg",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bwai.ts"), "/run/bwai/bwai.ts",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "opencode.json"), "/run/bwai/opencode.json",
 			"--setenv", "OPENCODE_CONFIG", "/run/bwai/opencode.json",
 			"--setenv", "BWAI_BROKER_SOCKET", "/run/bwai/broker.sock",
 		)
+		args = append(args, sandboxGitConfigEnv()...)
 		// Codex automatically loads AGENTS.md from CODEX_HOME. Overlay the
 		// generated broker guidance there rather than replacing the project's
 		// AGENTS.md or Codex's built-in instructions. Create the directory in
@@ -590,12 +599,14 @@ Use ` + "`bwai-outside`" + ` when the command requires host-only state:
 bwai-outside gh pr create   # needs host gh auth
 ` + "```" + `
 
-The two git operations that need host credentials have their own command,
-` + "`git-safe`" + `. It is already on your ` + "`PATH`" + ` — call it directly, with
-no ` + "`bwai-outside`" + ` prefix:
+Commits are signed on the host without any extra step: inside the
+sandbox, git's signing program is ` + "`bwai-gpg`" + `, which hands the commit to the
+broker to sign with the host's key. Just run ` + "`git commit`" + ` as usual.
+
+Pushing has its own command, ` + "`git-safe`" + `. It is already on your ` + "`PATH`" + ` —
+call it directly, with no ` + "`bwai-outside`" + ` prefix:
 
 ` + "```sh" + `
-git-safe commit -m "fix bug"  # commits what is staged, GPG-signed
 git-safe push [<remote>]      # publishes the current branch (fast-forward only)
 ` + "```" + `
 
@@ -606,19 +617,13 @@ force, the protected branches (main/master/trunk/develop plus patterns from
 push URL must be listed in ` + "`broker.push_allowed_urls`" + `; an empty list allows
 no push.
 
-` + "`git-safe commit`" + ` is the signing path: it takes only ` + "`-m <message>`" + `
-(repeat it for extra paragraphs), always signs, and refuses every other
-spelling — no ` + "`--amend`" + `, no ` + "`-a`" + `, no ` + "`--no-verify`" + `, no pathspecs. Use it
-instead of ` + "`bwai-outside git commit -S`" + `, which exposes the whole flag
-surface to the broker.
-
 Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
 these all succeed inside the sandbox:
 
 ` + "```sh" + `
 git status
 git add -A
-git commit -m "fix bug"          # unsigned commit; no host creds needed
+git commit -m "fix bug"          # signed through the broker
 git diff
 make test
 npm install
@@ -652,8 +657,7 @@ while one exists.** A confirm stalls the whole session on a human who may
 be asleep, so treat every approval prompt as a failure to find the rule
 that already covers the job. Scan the rule list for the wrapper or the
 narrower argv that is already auto-allowed — ` + "`git-safe push`" + ` over a
-confirmed raw ` + "`git push`" + `, ` + "`git-safe commit`" + ` over
-` + "`bwai-outside git commit -S`" + `. Taking the first rule that happens to
+confirmed raw ` + "`git push`" + `. Taking the first rule that happens to
 match, when an auto-allowed one sits a line below it, is laziness that
 spends a human's attention on nothing.
 

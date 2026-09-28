@@ -92,6 +92,9 @@ closes the connection.
 - `cwd` — must resolve inside the project bind mount. Reject otherwise.
 - `stdin_inherit` — reserved for future pty passthrough. MVP: always
   false.
+- `stdin` — optional bytes (base64 in JSON) fed to the host command's
+  stdin, which is then closed. A request, stdin included, is capped at
+  4 MiB.
 
 ### Host → sandbox reply frames
 
@@ -357,9 +360,8 @@ guarantee. So the commands that need a real judgement call live behind a
 literal argv:
 
 ```json
-{ "match": ["git-safe", "push", "**"],   "action": "auto_allow" },
-{ "match": ["git-safe", "commit", "**"], "action": "auto_allow" },
-{ "match": ["git-safe", "**"],           "action": "auto_deny" }
+{ "match": ["git-safe", "push", "**"], "action": "auto_allow" },
+{ "match": ["git-safe", "**"],         "action": "auto_deny" }
 ```
 
 `git-safe` is an argv[0] persona of the `bwai` binary, like
@@ -408,23 +410,44 @@ The ancestry check is the part a deny-list cannot express: it makes a
 destructive push impossible by construction — a property of the commit
 graph — rather than by blacklisting flags.
 
-`git-safe commit` is the same bargain for a different judgement call. A
-signed commit is the whole reason an agent needs the host — the signing
-key lives in `~/.gnupg`, which the sandbox hides — but handing the broker
-raw `git commit` also hands it `--amend`, `-a`, `--no-verify`,
-`--author`, `-F`, and pathspecs. The wrapper takes only `-m <message>`,
-repeatable for extra paragraphs, and adds `-S` itself:
+The rule carries a trailing `**` for the optional remote name. That is the
+one loose spot in the pattern, and the wrapper is what keeps it meaningful:
+the tail can only ever be a bare remote name.
 
-- always signs; signing is not the caller's choice;
-- accepts no flag but `-m`, so history rewrites and hook skips are
-  unrepresentable rather than merely denied;
-- refuses a pathspec, so only what was staged can be committed;
-- refuses a detached HEAD, for the same reason push does.
+### Signing (`git-sign`)
 
-Because the message is an argument, this rule carries a trailing `**`, as
-`push` does for its optional remote name. That is the one loose spot in the
-pattern, and the wrapper is what keeps it meaningful: the tail can only ever
-be `-m` pairs for `commit`, and at most a bare remote name for `push`.
+An earlier `git-safe commit` ran `git commit -S` on the host, in the
+agent's working tree. That was a sandbox escape: the tree is writable
+from the sandbox, and git executes what the repository tells it to —
+`.git/hooks/pre-commit`, `core.hooksPath`, `core.fsmonitor`,
+`gpg.program`, filter drivers — so the agent could plant a hook and have
+the auto-allowed commit run it on the host with `gpg-agent` and
+`ssh-agent` in reach. No flag list closes that; the only fix is for the
+host not to run git in a tree the agent controls.
+
+So signing is the only part that crosses the boundary. Inside the
+sandbox, bwai sets `gpg.program` and `gpg.ssh.program` to the `bwai-gpg`
+persona through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n` (environment config
+outranks every config file). The agent runs ordinary `git commit`; git
+hands the commit buffer to `bwai-gpg`, which forwards it as
+`["git-sign"]` with the buffer on `stdin`. On the host, `bwai git-sign`:
+
+- refuses anything but a commit object (`tree` first, then only
+  `parent`/`author`/`committer`/`encoding`/`mergetag` headers), so the
+  host key is not a general signing oracle — no tags, no arbitrary data;
+- takes no arguments, and resolves format, key and program from the
+  host's own git config (read from `/`, so no repository config applies)
+  — the key the sandbox's git asked for is ignored;
+- answers in the shape git expects: an armored signature on stdout and
+  the gpg status line on stderr for OpenPGP, the `.sig` contents for SSH
+  (the shim writes them to `<file>.sig`, as `ssh-keygen -Y sign` would).
+
+```json
+{ "match": ["git-sign"], "action": "auto_allow" }
+```
+
+The agent can still get any commit it builds signed; the signature means
+"made on this machine", not "reviewed". Verification is not forwarded.
 
 The rules above are `auto_allow`, and that is the point of the exercise.
 `confirm` is a last resort, not a safe default: it is what you reach for

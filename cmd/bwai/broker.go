@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -28,7 +29,14 @@ type brokerRequest struct {
 	Argv         []string `json:"argv"`
 	Cwd          string   `json:"cwd"`
 	StdinInherit bool     `json:"stdin_inherit"`
+	// Stdin is fed to the host command, then closed. Bytes rather than a
+	// string because a commit buffer handed to the signer need not be UTF-8.
+	Stdin []byte `json:"stdin,omitempty"`
 }
+
+// maxRequestBytes bounds one decoded request, stdin included, so a
+// sandbox client cannot make the broker buffer without limit.
+const maxRequestBytes = 4 << 20
 
 const (
 	opExec      = "exec"
@@ -335,7 +343,7 @@ func (b *Broker) serveBroker() {
 
 func (b *Broker) handleBrokerConn(conn net.Conn) {
 	defer conn.Close()
-	dec := json.NewDecoder(conn)
+	dec := json.NewDecoder(io.LimitReader(conn, maxRequestBytes))
 	enc := json.NewEncoder(conn)
 
 	var req brokerRequest
@@ -498,6 +506,9 @@ func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx in
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = req.Cwd
 	cmd.Env = os.Environ() // host env, not sandbox env
+	if len(req.Stdin) > 0 {
+		cmd.Stdin = bytes.NewReader(req.Stdin)
+	}
 	// Hand the git-safe push its allowlist as a snapshot from this broker's
 	// in-memory config. It is set unconditionally (empty included) so a
 	// stray host environment value can never widen it, and so the only
@@ -603,15 +614,15 @@ func (b *Broker) emitStartFailure(enc *json.Encoder, req brokerRequest, matchIdx
 
 // hostArgv maps a sandbox-facing command name onto this binary, so a
 // wrapper the agent calls inside the sandbox does not have to exist on
-// the host PATH. `git-safe` is the only such name: the sandbox copy is a
-// broker client, and the policy it defers to is the `git-safe`
-// subcommand of this binary, which the broker runs here on the host.
+// the host PATH. The sandbox copies of `git-safe` and `git-sign` are
+// broker clients; the policy they defer to is the same-named subcommand
+// of this binary, which the broker runs here on the host.
 //
 // The mapping happens after the rules have matched the original argv, so
 // it cannot name a command the rules did not authorize — the request
 // still has to look exactly like ["git-safe", …] to get this far.
 func hostArgv(argv []string) []string {
-	if len(argv) == 0 || argv[0] != "git-safe" {
+	if len(argv) == 0 || !hostSubcommands[argv[0]] {
 		return argv
 	}
 	self, err := os.Executable()
@@ -621,8 +632,11 @@ func hostArgv(argv []string) []string {
 		// cannot influence whether os.Executable succeeds.
 		return argv
 	}
-	return append([]string{self, "git-safe"}, argv[1:]...)
+	return append([]string{self}, argv...)
 }
+
+// hostSubcommands are the argv[0] names hostArgv resolves to this binary.
+var hostSubcommands = map[string]bool{"git-safe": true, "git-sign": true}
 
 // cwdAllowed enforces that the request runs inside the project bind
 // mount. Symlinks inside the sandbox could let a malicious agent steer

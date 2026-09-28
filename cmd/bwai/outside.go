@@ -194,12 +194,17 @@ func printRules(w io.Writer, rules []Rule) {
 	fmt.Fprintln(w, "Use `bwai approve` on the host to clear CONFIRM prompts.")
 }
 
-// runOutsideExec is the original exec-forwarding path, unchanged in
-// behaviour from the v1 client.
+// runOutsideExec forwards argv to the broker with the caller's stdio.
 func runOutsideExec(argv []string) int {
+	return outsideExec(argv, nil, os.Stdout, os.Stderr)
+}
+
+// outsideExec runs argv on the host through the broker, feeding it stdin
+// and writing its output streams to stdout/stderr.
+func outsideExec(argv []string, stdin []byte, stdout, stderr io.Writer) int {
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, outsideProg+": cannot determine cwd: %v\n", err)
+		fmt.Fprintf(stderr, outsideProg+": cannot determine cwd: %v\n", err)
 		return 127
 	}
 
@@ -209,9 +214,9 @@ func runOutsideExec(argv []string) int {
 	}
 	defer conn.Close()
 
-	req := brokerRequest{V: 1, Op: opExec, Argv: argv, Cwd: cwd, StdinInherit: false}
+	req := brokerRequest{V: 1, Op: opExec, Argv: argv, Cwd: cwd, Stdin: stdin}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
-		fmt.Fprintf(os.Stderr, outsideProg+": send: %v\n", err)
+		fmt.Fprintf(stderr, outsideProg+": send: %v\n", err)
 		return 127
 	}
 
@@ -223,31 +228,31 @@ func runOutsideExec(argv []string) int {
 			if errors.Is(err, io.EOF) {
 				return 0
 			}
-			fmt.Fprintf(os.Stderr, outsideProg+": recv: %v\n", err)
+			fmt.Fprintf(stderr, outsideProg+": recv: %v\n", err)
 			return 127
 		}
 		switch fr.Type {
 		case frameTypePending:
 			if !pendingPrinted {
-				fmt.Fprintf(os.Stderr, "%s: waiting for host approval (id %s)%s\n",
+				fmt.Fprintf(stderr, "%s: waiting for host approval (id %s)%s\n",
 					outsideProg, fr.ID, matchedRuleHint(fr.Matched))
 				pendingPrinted = true
 			}
 		case frameTypeStdout:
-			_, _ = io.WriteString(os.Stdout, fr.Data)
+			_, _ = io.WriteString(stdout, fr.Data)
 		case frameTypeStderr:
-			_, _ = io.WriteString(os.Stderr, fr.Data)
+			_, _ = io.WriteString(stderr, fr.Data)
 		case frameTypeExit:
 			if fr.Code == nil {
 				return 0
 			}
 			return *fr.Code
 		case frameTypeDenied:
-			fmt.Fprintf(os.Stderr, "%s: denied (%s)%s; run `bwai-outside --list-rules` to see what's allowed\n",
+			fmt.Fprintf(stderr, "%s: denied (%s)%s; run `bwai-outside --list-rules` to see what's allowed\n",
 				outsideProg, fr.Reason, matchedRuleHint(fr.Matched))
 			return 126
 		default:
-			fmt.Fprintf(os.Stderr, outsideProg+": unknown frame type %q\n", fr.Type)
+			fmt.Fprintf(stderr, outsideProg+": unknown frame type %q\n", fr.Type)
 		}
 	}
 }

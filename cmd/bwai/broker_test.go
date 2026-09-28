@@ -42,6 +42,11 @@ func TestHostArgv(t *testing.T) {
 			want: []string{self, "git-safe", "push"},
 		},
 		{
+			name: "git-sign resolves to the broker's own binary",
+			in:   []string{"git-sign"},
+			want: []string{self, "git-sign"},
+		},
+		{
 			name: "git-safe arguments are preserved",
 			in:   []string{"git-safe", "commit", "-m", "fix bug", "-m", "body"},
 			want: []string{self, "git-safe", "commit", "-m", "fix bug", "-m", "body"},
@@ -167,6 +172,26 @@ func TestBroker_AutoAllow(t *testing.T) {
 	}
 	if exitCode == nil || *exitCode != 0 {
 		t.Errorf("exit code = %v, want 0", exitCode)
+	}
+}
+
+func TestBroker_FeedsStdin(t *testing.T) {
+	projectDir := t.TempDir()
+	cfg := BrokerConfig{
+		Enabled: true,
+		Rules:   []Rule{{Match: []string{"cat"}, Action: ActionAutoAllow}},
+	}
+	b := startTestBroker(t, cfg, projectDir)
+	payload := []byte("tree x\n\xff not utf-8\n")
+	frames := sendRequest(t, b.BrokerSocketPath(), brokerRequest{
+		V: 1, Argv: []string{"cat"}, Cwd: projectDir, Stdin: payload,
+	})
+	gotStdout, _, exitCode := collectStreams(t, frames)
+	if exitCode == nil || *exitCode != 0 {
+		t.Fatalf("exit code = %v, want 0", exitCode)
+	}
+	if !strings.HasPrefix(gotStdout, "tree x\n") {
+		t.Fatalf("stdout = %q, want the stdin payload echoed", gotStdout)
 	}
 }
 

@@ -263,7 +263,7 @@ With it off, worktrees still get the persistent root, the shared git dir, and fu
 
 ## Host-execution broker (experimental)
 
-Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — `git commit -S` needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`. The broker lets specific argv lists escape to the host with per-command rules.
+Sometimes an agent needs to run something that requires keys the sandbox deliberately hides — signing a commit needs `~/.gnupg`, `git push` over SSH needs `~/.ssh`, `gh` needs its token. The broker lets specific argv lists escape to the host with per-command rules.
 
 Enable it by adding a `broker` block to `~/.config/bwai/bwai.json`:
 
@@ -273,8 +273,8 @@ Enable it by adding a `broker` block to `~/.config/bwai/bwai.json`:
     "enabled": true,
     "approval_timeout_s": 120,
     "rules": [
-      { "match": ["git", "status"],                 "action": "auto_allow" },
-      { "match": ["git", "commit", "-S", "-m", "fix"], "action": "confirm" }
+      { "match": ["gh", "pr", "view", "**"],   "action": "auto_allow" },
+      { "match": ["gh", "pr", "create", "**"], "action": "confirm" }
     ]
   }
 }
@@ -291,7 +291,7 @@ Three actions:
 Inside the sandbox, the agent invokes `bwai-outside` instead of the bare command:
 
 ```sh
-bwai-outside git commit -S -m "fix"
+bwai-outside gh pr create -R org/repo --head my-branch --title "Fix" --body "…"
 ```
 
 If the rule action is `confirm`, the sandbox sees a `waiting for host approval` message and the broker enqueues the request. From a second terminal on the host:
@@ -302,7 +302,7 @@ $ bwai approve
 
 [a7f3c0e1] sandbox wants to run on host
   cwd: /home/oscar/source/repos/foo
-  cmd: git commit -S -m fix
+  cmd: gh pr create -R org/repo --head my-branch --title Fix --body …
   age: 4012ms
 [y]es / [n]o / [a]lways-this-session / [s]kip
 > y
@@ -348,12 +348,11 @@ The audit log lands at `~/.local/state/bwai/broker.log` as JSONL: timestamp, arg
 
 Some commands are too dangerous to expose under their own name. `git push` is the motivating case: no rule pattern can catch `git push origin +main` (force by refspec), `git push origin :main` (delete by refspec), or a `--force` placed after the refspec — tokens match literally and `**` is only valid as the final token.
 
-The answer is a wrapper with a closed argument surface. `git-safe` is built from the same binary as `bwai` — bwai binds that one copy into the sandbox twice, so it appears beside `bwai-outside` under `/run/bwai/bin`. Nothing is installed on the host. It exposes two operations, and both are called directly, with no `bwai-outside` prefix:
+The answer is a wrapper with a closed argument surface. `git-safe` is built from the same binary as `bwai` — bwai binds that one copy into the sandbox twice, so it appears beside `bwai-outside` under `/run/bwai/bin`. Nothing is installed on the host. It is called directly, with no `bwai-outside` prefix:
 
 ```sh
 git-safe push            # current branch to origin
 git-safe push backup     # current branch to the `backup` remote
-git-safe commit -m "fix bug"
 ```
 
 In the sandbox `git-safe` is only a client: it forwards `["git-safe", …]` to the broker and decides nothing itself. The policy runs on the host, as the `bwai git-safe` subcommand the broker resolves the request to. That split is load-bearing — the agent can reach anything the sandbox can reach, so a check performed inside the sandbox would be advisory only.
@@ -373,21 +372,30 @@ The protected set is the built-in `main`/`master`/`trunk`/`develop` plus any pat
 
 Entries are remote URLs and branch patterns, and both sides are normalised before comparison, so `git@github.com:CubeB/RWE-B4.git` and `https://github.com/CubeB/RWE-B4` are the same URL entry.
 
-`git-safe commit` commits what is staged, GPG-signed. The signing key lives in the host's `~/.gnupg`, which the sandbox hides — that is the reason to route a commit through the host at all. It accepts only `-m <message>` (repeat for extra paragraphs) and adds `-S` itself, so signing is not the caller's choice; every other spelling is refused — `--amend`, `-a`/`--all`, `--no-verify`, `--author`, `-F`, and bare pathspecs. The agent cannot rewrite history or skip a hook, and the broker rule never has to describe those flags. It also refuses a detached HEAD, for the same reason `push` does.
-
 That reduces the broker rules to:
 
 ```json
-{ "match": ["git-safe", "push", "**"],   "action": "auto_allow" },
-{ "match": ["git-safe", "commit", "**"], "action": "auto_allow" },
-{ "match": ["git-safe", "**"],           "action": "auto_deny" }
+{ "match": ["git-safe", "push", "**"], "action": "auto_allow" },
+{ "match": ["git-safe", "**"],         "action": "auto_deny" }
 ```
 
 Note the action: **`auto_allow`, not `confirm`.** That is the payoff of moving the policy into the wrapper. A rule over raw `git push` needs a human because the pattern cannot express the check that matters; `git-safe` carries the check itself, so the ancestry decision is already made in code before git runs. A prompt would add nothing — an approver reading `git-safe push` learns only what the rule already told them — and an approval that is always granted is worse than none, because it trains the habit of approving without reading.
 
 Treat `confirm` as the last resort rather than the cautious default. Every confirm rule stalls an unattended session on a human who may be asleep, so each one is a standing bug report on the rule set: it marks a judgement nobody has moved into code yet. Write the wrapper, then write `auto_allow`. The agent is told the same thing in its injected context — hunt the rule list for an `AUTO_ALLOW` path before issuing a command that lands on a `confirm`.
 
-Both `push` and `commit` need a trailing `**` because both carry arguments — the remote name and the message respectively — but the wrapper is what makes the tail safe: `push` accepts at most a bare remote name and `commit` accepts only `-m` pairs, so neither pattern ever has to enumerate the bad flags.
+The rule needs a trailing `**` for the optional remote name, but the wrapper is what makes the tail safe: `push` accepts at most a bare remote name, so the pattern never has to enumerate the bad flags.
+
+### Signed commits (`git-sign`)
+
+The agent commits with plain `git commit`, and the commit is signed with the host's key. Inside the sandbox, bwai sets git's `gpg.program` and `gpg.ssh.program` to `bwai-gpg` (through `GIT_CONFIG_*` environment config, which outranks every config file). `bwai-gpg` forwards the buffer git wants signed to the broker as `["git-sign"]`; on the host, `bwai git-sign` checks that the buffer is a commit object and signs it with the key, format and program from the host's own git config. The key the sandbox's git names is ignored.
+
+```json
+{ "match": ["git-sign"], "action": "auto_allow" }
+```
+
+The host never runs `git` in the agent's repository to do this. That is the point: a repository the agent can write carries hooks and config — `.git/hooks/*`, `core.hooksPath`, `core.fsmonitor`, `gpg.program`, `core.sshCommand`, filter drivers — that git executes, so any host-side git command in that tree runs the agent's code with the host's credentials. Signing only a validated commit buffer keeps the host key from becoming a general-purpose signing oracle, but it does sign any commit the agent builds; treat the signature as "made on this machine", not "reviewed by me".
+
+Verification (`git log --show-signature`, `git verify-commit`) is not available inside the sandbox.
 
 ### Telling the agent it can call `bwai-outside`
 

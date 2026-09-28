@@ -14,9 +14,8 @@ import (
 const gitSafeUsage = `git-safe — a deliberately narrow git wrapper for the bwai broker.
 
 Usage:
-  git-safe push [<remote>]          Push the current branch to <remote> (default
-                                    origin), fast-forward only.
-  git-safe commit -m <message> ...  Commit staged changes, GPG-signed.
+  git-safe push [<remote>]  Push the current branch to <remote> (default
+                            origin), fast-forward only.
 
 git-safe push accepts at most one remote name — no flags, no refspecs, no
 URL. The remote is trusted only as far as its push URL appears in the
@@ -27,16 +26,18 @@ trunk, develop plus any patterns in broker.protected_branches — and never
 performs a non-fast-forward update: the remote's tip must be an ancestor
 of HEAD. The remote branch is created if it does not exist yet.
 
-git-safe commit takes only -m <message>, repeated for extra paragraphs,
-and always signs with -S — the host's keyring is the reason to route a
-commit through the broker in the first place. Every other git commit
-spelling is refused: --amend, -a/--all, --no-verify, --author, -F, and
-bare pathspecs.
+To commit, run git commit directly: it is signed with the host's key
+through the broker (git's gpg.program is bwai-gpg inside the sandbox).
 
 The policy lives in code rather than in an allowlist pattern. The broker's
 matcher cannot express "any force flag, in any position", so commands that
 need that judgement live behind a wrapper and the broker is left to match
-a short argv: ["git-safe", "push", "**"] or ["git-safe", "commit", "**"].`
+a short argv: ["git-safe", "push", "**"].`
+
+// gitSafeCommitRemoved answers the retired `git-safe commit`, which ran
+// git commit on the host inside the agent's repository — and with it the
+// repository's hooks and config.
+const gitSafeCommitRemoved = "git-safe: `git-safe commit` has been removed; run `git commit` directly — it is signed through the broker automatically"
 
 // defaultProtectedBranches are always refused, independent of config, so a
 // config mistake cannot open the canonical branches. Configured patterns
@@ -63,6 +64,9 @@ func runGitSafeClient(args []string) int {
 	case "-h", "--help", "help":
 		fmt.Println(gitSafeUsage)
 		return 0
+	case "commit":
+		fmt.Fprintln(os.Stderr, gitSafeCommitRemoved)
+		return 2
 	}
 	return runOutsideExec(append([]string{"git-safe"}, args...))
 }
@@ -81,7 +85,8 @@ func runGitSafe(args []string) int {
 	case "push":
 		return runGitSafePush(args[1:])
 	case "commit":
-		return runGitSafeCommit(args[1:])
+		fmt.Fprintln(os.Stderr, gitSafeCommitRemoved)
+		return 2
 	case "-h", "--help", "help":
 		fmt.Println(gitSafeUsage)
 		return 0
@@ -327,56 +332,6 @@ func branchProtected(branch string, patterns []string) bool {
 		}
 	}
 	return false
-}
-
-// runGitSafeCommit implements `git-safe commit`. It builds the argv via
-// planCommit, which is pure and unit-tested, then refuses a detached
-// HEAD for the same reason push does: the commit would land on no
-// branch. Everything else is git's business.
-func runGitSafeCommit(args []string) int {
-	argv, err := planCommit(args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
-		return 2
-	}
-	if _, err := gitOutput("symbolic-ref", "--quiet", "--short", "HEAD"); err != nil {
-		fmt.Fprintln(os.Stderr, "git-safe: refusing to commit: HEAD is detached (check out a branch first)")
-		return 1
-	}
-	return execGit(argv)
-}
-
-// planCommit is the entire policy for `git-safe commit`, kept pure so it
-// can be tested without a repository. args is everything after the
-// subcommand; the only accepted form is one or more `-m <message>`
-// pairs, and repeated -m adds paragraphs exactly as it does for git.
-//
-// Signing is not the caller's choice: the wrapper always emits -S,
-// because the host keyring the sandbox hides is the reason to route a
-// commit through the broker, and because a fixed argv is what keeps the
-// broker rule from having to describe the flags we do not want.
-func planCommit(args []string) ([]string, error) {
-	var msgs []string
-	for i := 0; i < len(args); i++ {
-		if args[i] != "-m" {
-			return nil, fmt.Errorf("refusing to commit: %q is not allowed (only -m <message> is accepted)", args[i])
-		}
-		if i+1 == len(args) {
-			return nil, fmt.Errorf("refusing to commit: -m needs a message")
-		}
-		i++
-		// The value is taken verbatim, so a message that looks like a flag
-		// ("--amend") stays a message — argv reaches git without a shell.
-		msgs = append(msgs, args[i])
-	}
-	if len(msgs) == 0 {
-		return nil, fmt.Errorf("refusing to commit: a message is required (-m <message>)")
-	}
-	argv := []string{"git", "commit", "-S"}
-	for _, m := range msgs {
-		argv = append(argv, "-m", m)
-	}
-	return argv, nil
 }
 
 // gitOutput runs git and returns its combined output. Callers only care
