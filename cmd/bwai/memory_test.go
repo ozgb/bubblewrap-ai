@@ -21,8 +21,11 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(got)
-	if !strings.HasPrefix(s, strings.Replace(agentMemoryFileContent, "{{intro}}", sandboxIntro, 1)) {
+	if !strings.HasPrefix(s, brokerBlockBegin+"\n"+strings.Replace(agentMemoryFileContent, "{{intro}}", sandboxIntro, 1)) {
 		t.Errorf("CLAUDE.md should open with the bwai fragment:\n%s", s)
+	}
+	if !strings.HasSuffix(s, brokerBlockEnd+"\n") {
+		t.Errorf("CLAUDE.md should close the managed block:\n%s", s)
 	}
 	// The rules ride along in the fragment so the agent knows them before
 	// its first turn, without having to run `bwai-outside --list-rules`.
@@ -156,10 +159,11 @@ func TestRenderWorktreeSectionWorktreeStart(t *testing.T) {
 func TestInstallOpencodeAgents(t *testing.T) {
 	tmpDir := t.TempDir()
 	host := filepath.Join(t.TempDir(), "AGENTS.md")
+	fragment := []byte(brokerBlockBegin + "\n# bwai broker\nrules\n" + brokerBlockEnd + "\n")
 	if err := os.WriteFile(host, []byte("# host instructions\nkeep me\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installOpencodeAgents(tmpDir, host, []byte("# bwai broker\nrules\n")); err != nil {
+	if err := installOpencodeAgents(tmpDir, host, fragment); err != nil {
 		t.Fatalf("installOpencodeAgents: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"))
@@ -171,12 +175,37 @@ func TestInstallOpencodeAgents(t *testing.T) {
 	if s := string(got); !strings.Contains(s, "keep me") || !strings.Contains(s, "# bwai broker") {
 		t.Errorf("merged AGENTS.md missing host or broker content:\n%s", s)
 	}
-	// On an agent box the host file is already a bwai fragment
-	// (bwai-refresh-context); the fresh fragment replaces it, no duplicate.
+	// On an agent box the host file carries a marked bwai block. A refresh
+	// replaces that block in place, keeping the host's own instructions and
+	// anything the user wrote after the block.
+	hostContent := "my rules\n\n" + brokerBlockBegin + "\n# bwai broker\nstale\n" + brokerBlockEnd + "\n\ntrailing note\n"
+	if err := os.WriteFile(host, []byte(hostContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fresh := []byte(brokerBlockBegin + "\n# bwai broker\nfresh\n" + brokerBlockEnd + "\n")
+	if err := installOpencodeAgents(tmpDir, host, fresh); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	if strings.Contains(s, "stale") || !strings.Contains(s, "fresh") {
+		t.Errorf("agent-box AGENTS.md should be replaced, not merged:\n%s", s)
+	}
+	if !strings.Contains(s, "my rules") || !strings.Contains(s, "trailing note") {
+		t.Errorf("host content around the block must survive:\n%s", s)
+	}
+	if n := strings.Count(s, brokerBlockBegin); n != 1 {
+		t.Errorf("want exactly one managed block, got %d:\n%s", n, s)
+	}
+	// A legacy agent-box file that is only the old unmarked fragment is
+	// replaced wholesale rather than getting a block appended.
 	if err := os.WriteFile(host, []byte("# bwai broker\nstale\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := installOpencodeAgents(tmpDir, host, []byte("# bwai broker\nfresh\n")); err != nil {
+	if err := installOpencodeAgents(tmpDir, host, fresh); err != nil {
 		t.Fatal(err)
 	}
 	got, err = os.ReadFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"))
@@ -184,7 +213,7 @@ func TestInstallOpencodeAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s := string(got); strings.Contains(s, "stale") || !strings.Contains(s, "fresh") {
-		t.Errorf("agent-box AGENTS.md should be replaced, not merged:\n%s", s)
+		t.Errorf("legacy agent-box AGENTS.md should be replaced:\n%s", s)
 	}
 }
 

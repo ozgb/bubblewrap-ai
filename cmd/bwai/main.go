@@ -843,8 +843,19 @@ func daemonAgentContext(rules []Rule) string {
 	return renderAgentContext(daemonIntro, rules, "", "", false)
 }
 
+// brokerBlockBegin and brokerBlockEnd delimit the managed broker block in
+// a global instructions file that also carries the user's own content, so a
+// refresh replaces the block in place instead of refusing or piling up a
+// second copy. Markers are HTML comments so they vanish when the file is
+// rendered. bwai-refresh-context matches these literals.
+const (
+	brokerBlockBegin = "<!-- bwai:begin -->"
+	brokerBlockEnd   = "<!-- bwai:end -->"
+)
+
 func renderAgentContext(intro string, rules []Rule, worktreeRoot, mainTree string, exposeMain bool) string {
 	var b strings.Builder
+	b.WriteString(brokerBlockBegin + "\n")
 	b.WriteString(strings.Replace(agentMemoryFileContent, "{{intro}}", intro, 1))
 	if worktreeRoot != "" {
 		b.WriteString(renderWorktreeSection(worktreeRoot, mainTree, exposeMain))
@@ -856,6 +867,7 @@ func renderAgentContext(intro string, rules []Rule, worktreeRoot, mainTree strin
 	b.WriteString("```\n")
 	printRules(&b, rules)
 	b.WriteString("```\n")
+	b.WriteString(brokerBlockEnd + "\n")
 	return b.String()
 }
 
@@ -899,17 +911,39 @@ func installBwaiMod(tmpDir string) error {
 // for instructions. v2 accepts the config `instructions` field but never
 // resolves it, so AGENTS.md is the only path that reaches the model. The
 // host's own global instructions are preserved and the broker fragment
-// appended; when the host file is already a bwai fragment (as
-// bwai-refresh-context leaves it on an agent box) the fresh fragment
-// replaces it rather than duplicating.
+// merged in; a marked block the host already carries (as
+// bwai-refresh-context leaves it on an agent box) is replaced rather than
+// duplicated.
 func installOpencodeAgents(tmpDir, hostAgents string, fragment []byte) error {
 	merged := fragment
 	if host, err := os.ReadFile(hostAgents); err == nil {
-		if existing := strings.TrimSpace(string(host)); existing != "" && !strings.HasPrefix(existing, "# bwai broker") {
-			merged = append(append([]byte(host), '\n', '\n'), fragment...)
-		}
+		merged = mergeBrokerBlock(host, fragment)
 	}
 	return os.WriteFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"), merged, 0o644)
+}
+
+// mergeBrokerBlock returns the host instructions with the broker fragment
+// merged in. An existing marked block is replaced in place, a legacy file
+// that is nothing but the fragment (as the old bwai-refresh-context wrote)
+// is replaced wholesale, and anything else gets the fragment appended.
+func mergeBrokerBlock(host, fragment []byte) []byte {
+	s := string(host)
+	if strings.TrimSpace(s) == "" {
+		return fragment
+	}
+	if begin := strings.Index(s, brokerBlockBegin); begin >= 0 {
+		if rel := strings.Index(s[begin:], brokerBlockEnd); rel >= 0 {
+			end := begin + rel + len(brokerBlockEnd)
+			if strings.HasPrefix(s[end:], "\n") {
+				end++
+			}
+			return []byte(s[:begin] + string(fragment) + s[end:])
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(s), "# bwai broker") {
+		return fragment
+	}
+	return append(append([]byte(s), '\n', '\n'), fragment...)
 }
 
 // installBwaiOutsideHelper places a copy of the running bwai binary

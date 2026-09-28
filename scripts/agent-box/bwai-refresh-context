@@ -3,22 +3,73 @@
 # global instructions file. Run at login (from ~/.bashrc.d/bwai.sh) so a
 # rule change on the box reaches the agents without anyone remembering to.
 #
-# Only files that are missing or already begin with the guidance's
-# heading are written, so instructions the agent user wrote by hand are
-# left alone.
+# The guidance sits between <!-- bwai:begin --> and <!-- bwai:end -->
+# markers. A file with other content gets the marked block appended, and
+# every later run rewrites just that block, so the agent user's own
+# instructions are preserved.
 set -u
 
+begin='<!-- bwai:begin -->'
+end='<!-- bwai:end -->'
+
 ctx=$(timeout 5 bwai-outside --context 2>/dev/null) || exit 0
-[[ $ctx == "# bwai broker"* ]] || exit 0
+[[ $ctx == *"$begin"* && $ctx == *"$end"* ]] || exit 0
+
+ctxfile=$(mktemp) || exit 0
+trap 'rm -f "$ctxfile"' EXIT
+printf '%s\n' "$ctx" >"$ctxfile"
+
+write_ctx() { # path — replace the whole file with the managed block
+	local f=$1 tmp
+	tmp=$(mktemp "$f.XXXXXX") || return 1
+	cp "$ctxfile" "$tmp" && mv -f "$tmp" "$f"
+}
+
+replace_ctx() { # path — rewrite the marked block, keeping the rest
+	local f=$1 tmp
+	tmp=$(mktemp "$f.XXXXXX") || return 1
+	if awk -v b="$begin" -v e="$end" -v cb="$ctxfile" '
+			$0 == b { while ((getline l < cb) > 0) print l; inblock = 1; next }
+			$0 == e { inblock = 0; next }
+			!inblock { print }
+		' "$f" >"$tmp"; then
+		mv -f "$tmp" "$f"
+	else
+		rm -f "$tmp"
+		return 1
+	fi
+}
 
 for f in \
 	"$HOME/.config/opencode/AGENTS.md" \
 	"$HOME/.claude/CLAUDE.md" \
 	"$HOME/.codex/AGENTS.md"; do
-	if [[ -e $f ]] && [[ $(head -n1 "$f") != "# bwai broker" ]]; then
-		echo "bwai: not refreshing $f: it has other content; add the output of \`bwai-outside --context\` yourself" >&2
-		continue
-	fi
 	mkdir -p "$(dirname "$f")"
-	tmp=$(mktemp "$f.XXXXXX") && printf '%s\n' "$ctx" >"$tmp" && mv -f "$tmp" "$f"
+	if [[ -e $f ]]; then
+		has_begin=0 has_end=0
+		grep -qF "$begin" "$f" && has_begin=1
+		grep -qF "$end" "$f" && has_end=1
+		if ((has_begin && has_end)); then
+			replace_ctx "$f" || echo "bwai: could not refresh $f" >&2
+			continue
+		fi
+		if ((has_begin || has_end)); then
+			echo "bwai: not refreshing $f: unmatched bwai marker; fix or remove that line" >&2
+			continue
+		fi
+		if [[ $(head -n1 "$f") == "# bwai broker" ]]; then
+			# A file written before markers existed: the whole thing is ours.
+			write_ctx "$f" || echo "bwai: could not refresh $f" >&2
+			continue
+		fi
+		# The agent user's own instructions: append the block after them.
+		tmp=$(mktemp "$f.XXXXXX") || continue
+		if { cat "$f"; [[ -s $f ]] && printf '\n'; cat "$ctxfile"; } >"$tmp"; then
+			mv -f "$tmp" "$f"
+		else
+			rm -f "$tmp"
+		fi
+	else
+		write_ctx "$f" || echo "bwai: could not write $f" >&2
+	fi
 done
