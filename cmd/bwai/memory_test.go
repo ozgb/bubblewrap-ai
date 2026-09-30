@@ -13,7 +13,7 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 		{Match: []string{"git-safe", "push"}, Action: ActionConfirm},
 		{Match: []string{"gh", "pr", "create", "**"}, Action: ActionConfirm},
 	}
-	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees", "", "", true); err != nil {
+	if err := installAgentMemoryFile(tmpDir, rules, "/home/u/proj/.proj.worktrees", "", "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -51,6 +51,13 @@ func TestInstallAgentMemoryFile(t *testing.T) {
 	}
 	if string(codex) != s {
 		t.Errorf("Codex broker guidance differs from shared agent guidance")
+	}
+	cline, err := os.ReadFile(filepath.Join(tmpDir, "CLINE_RULES.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cline) != s {
+		t.Errorf("Cline broker guidance differs from shared agent guidance")
 	}
 }
 
@@ -104,7 +111,7 @@ func TestCodexHomeWritable(t *testing.T) {
 // be absent rather than advertising a path that does not exist.
 func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil, "", "", "", true); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, "", "", "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -118,7 +125,7 @@ func TestInstallAgentMemoryFileNoWorktreeRoot(t *testing.T) {
 
 func TestInstallAgentMemoryFileNoRules(t *testing.T) {
 	tmpDir := t.TempDir()
-	if err := installAgentMemoryFile(tmpDir, nil, "", "", "", true); err != nil {
+	if err := installAgentMemoryFile(tmpDir, nil, "", "", "", "", true); err != nil {
 		t.Fatalf("installAgentMemoryFile: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(tmpDir, "CLAUDE.md"))
@@ -217,6 +224,44 @@ func TestInstallOpencodeAgents(t *testing.T) {
 	}
 }
 
+func TestInstallClineRules(t *testing.T) {
+	tmpDir := t.TempDir()
+	fragment := []byte(brokerBlockBegin + "\n# bwai broker\nrules\n" + brokerBlockEnd + "\n")
+	// Without a host rule file the fragment stands alone.
+	if err := installClineRules(tmpDir, filepath.Join(t.TempDir(), "bwai.md"), fragment); err != nil {
+		t.Fatalf("installClineRules: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(tmpDir, "CLINE_RULES.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(fragment) {
+		t.Errorf("standalone rule file = %q, want the fragment", got)
+	}
+	// A host rule file of the same name — the user's own, or one an agent
+	// box wrote — is merged rather than shadowed, and its marked block is
+	// replaced in place.
+	host := filepath.Join(t.TempDir(), "bwai.md")
+	hostContent := "my rules\n\n" + brokerBlockBegin + "\n# bwai broker\nstale\n" + brokerBlockEnd + "\n"
+	if err := os.WriteFile(host, []byte(hostContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := installClineRules(tmpDir, host, fragment); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(filepath.Join(tmpDir, "CLINE_RULES.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(got)
+	if !strings.Contains(s, "my rules") {
+		t.Errorf("host rules must survive the merge:\n%s", s)
+	}
+	if strings.Contains(s, "stale") || !strings.Contains(s, "# bwai broker") {
+		t.Errorf("the marked block should be replaced with the fragment:\n%s", s)
+	}
+}
+
 func TestOpencodeAgentsMountable(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".config", "opencode")
@@ -239,6 +284,39 @@ func TestOpencodeAgentsMountable(t *testing.T) {
 	cfg.HomeAllow = nil
 	if !opencodeAgentsMountable(dir, home, cfg) {
 		t.Fatal("existing AGENTS.md should be mountable")
+	}
+}
+
+func TestClineRulesMountable(t *testing.T) {
+	home := t.TempDir()
+	path := clineRulesPath(home)
+	cfg := defaultConfig()
+	// A host with no ~/.cline yet gets it on the writable home overlay.
+	if !clineRulesMountable(path, home, cfg) {
+		t.Fatal("a host without ~/.cline should be mountable")
+	}
+	// An existing ~/.cline is mounted read-write only when home_allow names
+	// it, and bwrap cannot create a mountpoint under a read-only parent.
+	if err := os.MkdirAll(filepath.Join(home, ".cline"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !clineRulesMountable(path, home, cfg) {
+		t.Fatal("allowed ~/.cline should be mountable")
+	}
+	cfg.HomeAllow = nil
+	if clineRulesMountable(path, home, cfg) {
+		t.Fatal("read-only ~/.cline should not be mountable")
+	}
+	// A rule file that already exists is its own mountpoint, whatever the
+	// parent allows.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !clineRulesMountable(path, home, cfg) {
+		t.Fatal("an existing rule file should be mountable")
 	}
 }
 

@@ -43,7 +43,8 @@ replace_ctx() { # path — rewrite the marked block, keeping the rest
 for f in \
 	"$HOME/.config/opencode/AGENTS.md" \
 	"$HOME/.claude/CLAUDE.md" \
-	"$HOME/.codex/AGENTS.md"; do
+	"$HOME/.codex/AGENTS.md" \
+	"$HOME/.cline/rules/bwai.md"; do
 	mkdir -p "$(dirname "$f")"
 	if [[ -e $f ]]; then
 		has_begin=0 has_end=0

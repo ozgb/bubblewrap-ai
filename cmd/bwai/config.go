@@ -165,6 +165,8 @@ func defaultConfig() Config {
 			"OPENAI_API_BASE",
 			// Codex CLI state directory override
 			"CODEX_HOME",
+			// Cline data directory override
+			"CLINE_DATA_DIR",
 			// OpenRouter
 			"OPENROUTER_API_KEY",
 			// Command Code
@@ -187,6 +189,7 @@ func defaultConfig() Config {
 			".cargo",
 			"go/bin",       // go-installed tools; ~/go is not a dotdir, so it'd otherwise be hidden
 			".commandcode", // Command Code
+			".cline",       // Cline config, provider auth, sessions, and global rules
 		},
 		HomeBlock: []string{
 			".gnupg",

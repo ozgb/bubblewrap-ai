@@ -59,6 +59,19 @@ func TestDefaultConfigSupportsCommandCode(t *testing.T) {
 	}
 }
 
+// TestDefaultConfigSupportsCline pins the Cline wiring: ~/.cline must be
+// writable in the sandbox (provider auth, sessions, global rules) and the
+// CLINE_DATA_DIR state override must pass through.
+func TestDefaultConfigSupportsCline(t *testing.T) {
+	cfg := defaultConfig()
+	if !containsSequence(cfg.HomeAllow, ".cline") {
+		t.Errorf("home_allow = %v, want it to include .cline", cfg.HomeAllow)
+	}
+	if !containsSequence(cfg.EnvAllow, "CLINE_DATA_DIR") {
+		t.Errorf("env_allow = %v, want it to include CLINE_DATA_DIR", cfg.EnvAllow)
+	}
+}
+
 func TestDefaultConfigSupportsCodex(t *testing.T) {
 	cfg := defaultConfig()
 	if !containsSequence(cfg.HomeAllow, ".codex") {

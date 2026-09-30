@@ -115,12 +115,13 @@ for public repositories a classic PAT with only `public_repo`.
 your `authorized_keys`), which `toolbox create` / `toolbox enter` need.
 Every new shell runs `bwai-refresh-context`, which writes the broker's
 guidance and live rules (`bwai-outside --context`) to the agents' global
-instructions: `~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md` and
-`~/.codex/AGENTS.md`. A rule change on the box reaches the agents at
-their next login, with nothing to remember. The guidance sits between
-`<!-- bwai:begin -->` and `<!-- bwai:end -->` markers: a file with other
-content gets the marked block appended, and later runs rewrite just that
-block, so the agent user's own instructions are never touched.
+instructions: `~/.config/opencode/AGENTS.md`, `~/.claude/CLAUDE.md`,
+`~/.codex/AGENTS.md` and `~/.cline/rules/bwai.md`. A rule change on the
+box reaches the agents at their next login, with nothing to remember.
+The guidance sits between `<!-- bwai:begin -->` and `<!-- bwai:end -->`
+markers: a file with other content gets the marked block appended, and
+later runs rewrite just that block, so the agent user's own instructions
+are never touched.
 
 Work under `~/work`. The broker refuses requests from anywhere else, and
 it compares paths as the host sees them, so the work tree has to be at

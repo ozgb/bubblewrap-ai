@@ -191,7 +191,7 @@ func runSandbox() int {
 			_ = broker.Close()
 			return 1
 		}
-		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot, worktreeMainTree, opencodeAgentsPath(home), exposeMain); err != nil {
+		if err := installAgentMemoryFile(broker.TmpDir(), cfg.Broker.Rules, worktreeRoot, worktreeMainTree, opencodeAgentsPath(home), clineRulesPath(home), exposeMain); err != nil {
 			fmt.Fprintf(os.Stderr, "bwai: install agent memory: %v\n", err)
 			_ = broker.Close()
 			return 1
@@ -211,7 +211,7 @@ func runSandbox() int {
 		stopWatch := make(chan struct{})
 		defer close(stopWatch)
 		reload := sessionReloader(broker, configPath, localPath, localState == localApplied, func(bc BrokerConfig) {
-			_ = installAgentMemoryFile(broker.TmpDir(), bc.Rules, worktreeRoot, worktreeMainTree, opencodeAgentsPath(home), exposeMain)
+			_ = installAgentMemoryFile(broker.TmpDir(), bc.Rules, worktreeRoot, worktreeMainTree, opencodeAgentsPath(home), clineRulesPath(home), exposeMain)
 		})
 		go watchConfig([]string{configPath, localPath, trustStorePath()}, configPollInterval, nil, stopWatch, reload,
 			func(msg string, ok bool) {
@@ -247,6 +247,9 @@ func runSandbox() int {
 		}
 		if !opencodeAgentsMountable(filepath.Dir(opencodeAgentsPath(home)), home, cfg) {
 			fmt.Println("bwai: opencode broker guidance not mounted because ~/.config/opencode is missing or read-only; add it to home_allow.")
+		}
+		if !clineRulesMountable(clineRulesPath(home), home, cfg) {
+			fmt.Println("bwai: Cline broker guidance not mounted because ~/.cline is read-only; add it to home_allow.")
 		}
 		if url := broker.WebURL(); url != "" {
 			fmt.Printf("bwai: web approval enabled on %s — per-request links arrive via desktop notification.\n", url)
@@ -350,6 +353,15 @@ func runSandbox() int {
 		if opencodeAgents := opencodeAgentsPath(home); opencodeAgentsMountable(filepath.Dir(opencodeAgents), home, cfg) {
 			args = append(args,
 				"--ro-bind", filepath.Join(broker.TmpDir(), "OPENCODE_AGENTS.md"), opencodeAgents,
+			)
+		}
+		// Cline combines every markdown file under ~/.cline/rules into its
+		// global rules. Overlay a merged file (host rules + broker fragment)
+		// as one more rule file, so the host's own rules are neither written
+		// to nor replaced.
+		if clineRules := clineRulesPath(home); clineRulesMountable(clineRules, home, cfg) {
+			args = append(args,
+				"--ro-bind", filepath.Join(broker.TmpDir(), "CLINE_RULES.md"), clineRules,
 			)
 		}
 		args = append(args, sandboxGitConfigEnv()...)
@@ -472,6 +484,33 @@ func opencodeAgentsMountable(dir, home string, cfg Config) bool {
 		return false
 	}
 	return slices.Contains(cfg.HomeAllow, filepath.ToSlash(rel))
+}
+
+// clineRulesPath is the global rule file Cline loads for every project.
+// Cline also searches ~/Documents/Cline/Rules and ~/Cline/Rules, but the
+// rules directory under its config root sits next to the state bwai
+// already exposes.
+func clineRulesPath(home string) string {
+	return filepath.Join(home, ".cline", "rules", "bwai.md")
+}
+
+// clineRulesMountable reports whether the sandbox can expose the merged
+// rules file at path. bwrap cannot create a mountpoint under a read-only
+// parent, so the file must already exist, or ~/.cline must be writable in
+// the sandbox: bound read-write because home_allow names it, or created
+// on the writable home overlay when the host has no ~/.cline yet.
+func clineRulesMountable(path, home string, cfg Config) bool {
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return true
+	}
+	info, err := os.Stat(filepath.Join(home, ".cline"))
+	if os.IsNotExist(err) {
+		return true
+	}
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return matchesDirect(cfg.HomeAllow, ".cline")
 }
 
 // codexHomePath resolves the directory Codex will use in the sandbox. A
@@ -792,9 +831,10 @@ func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
 // tmpdir. It's bind-mounted into the sandbox at /run/bwai/CLAUDE.md,
 // where Claude Code picks it up via `--add-dir /run/bwai`, and where the
 // command-code mod below reads it. A copy is installed as ~/.codex/AGENTS.md
-// inside the sandbox so Codex loads it as global instructions, and a merge
+// inside the sandbox so Codex loads it as global instructions, a merge
 // of the host's global AGENTS.md with the fragment is installed for
-// opencode at opencodeAgents.
+// opencode at opencodeAgents, and a merge of the host's global rule file
+// is installed for Cline at clineRules.
 //
 // The live rule set is rendered into the fragment so every agent that
 // loads it knows what the broker will and won't run before its first
@@ -808,7 +848,7 @@ func renderWorktreeSection(root, mainTree string, exposeMain bool) string {
 // don't create one on the ephemeral overlay and lose it. mainTree is
 // set only for sessions that started in a linked worktree ("" for main
 // checkouts) and selects the writable-paths wording via exposeMain.
-func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree, opencodeAgents string, exposeMain bool) error {
+func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree, opencodeAgents, clineRules string, exposeMain bool) error {
 	content := []byte(agentContext(rules, worktreeRoot, mainTree, exposeMain))
 	if err := os.WriteFile(filepath.Join(tmpDir, "CLAUDE.md"), content, 0o644); err != nil {
 		return err
@@ -816,7 +856,10 @@ func installAgentMemoryFile(tmpDir string, rules []Rule, worktreeRoot, mainTree,
 	if err := os.WriteFile(filepath.Join(tmpDir, "CODEX_AGENTS.md"), content, 0o644); err != nil {
 		return err
 	}
-	return installOpencodeAgents(tmpDir, opencodeAgents, content)
+	if err := installOpencodeAgents(tmpDir, opencodeAgents, content); err != nil {
+		return err
+	}
+	return installClineRules(tmpDir, clineRules, content)
 }
 
 const sandboxIntro = `This shell runs inside a bwai sandbox. The project working tree is
@@ -915,11 +958,27 @@ func installBwaiMod(tmpDir string) error {
 // bwai-refresh-context leaves it on an agent box) is replaced rather than
 // duplicated.
 func installOpencodeAgents(tmpDir, hostAgents string, fragment []byte) error {
+	return installMergedGuidance(tmpDir, "OPENCODE_AGENTS.md", hostAgents, fragment)
+}
+
+// installClineRules writes the global rule file Cline reads for every
+// project. Every markdown file under ~/.cline/rules joins the global rule
+// set, so the fragment ships as one more rule file, merged with a host
+// file of the same name rather than shadowing it.
+func installClineRules(tmpDir, hostRules string, fragment []byte) error {
+	return installMergedGuidance(tmpDir, "CLINE_RULES.md", hostRules, fragment)
+}
+
+// installMergedGuidance writes a global instructions file for an agent,
+// merging the broker fragment into the host's own file when one is already
+// there. The overlay inside the sandbox adds to the user's instructions
+// instead of replacing them; the host file is only ever read.
+func installMergedGuidance(tmpDir, name, hostFile string, fragment []byte) error {
 	merged := fragment
-	if host, err := os.ReadFile(hostAgents); err == nil {
+	if host, err := os.ReadFile(hostFile); err == nil {
 		merged = mergeBrokerBlock(host, fragment)
 	}
-	return os.WriteFile(filepath.Join(tmpDir, "OPENCODE_AGENTS.md"), merged, 0o644)
+	return os.WriteFile(filepath.Join(tmpDir, name), merged, 0o644)
 }
 
 // mergeBrokerBlock returns the host instructions with the broker fragment

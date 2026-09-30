@@ -1,6 +1,6 @@
 # bubblewrap-ai
 
-Runs AI coding agents (Codex, Claude, Gemini, Goose, opencode, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
+Runs AI coding agents (Codex, Claude, Gemini, Goose, opencode, Cline, Command Code) inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox. The host filesystem is read-only, only the current project directory and the dotfiles you whitelist are accessible. The sandbox also starts with a clean environment, only variables explicitly allowed are visible to the agent.
 
 ## Requirements
 
@@ -48,6 +48,7 @@ By default, `bwai` opens a sandboxed `bash` shell. From there you can launch any
 [🫧] > goose
 [🫧] > gemini
 [🫧] > opencode
+[🫧] > cline
 ```
 
 ### Running a command directly
@@ -114,7 +115,8 @@ Example `~/.config/bwai/bwai.json`:
     ".cache",
     ".cargo",
     "go/bin",
-    ".commandcode"
+    ".commandcode",
+    ".cline"
   ],
   "home_block": [
     ".gnupg",
@@ -164,6 +166,7 @@ Example `~/.config/bwai/bwai.json`:
     "OPENAI_API_KEY",
     "OPENAI_API_BASE",
     "CODEX_HOME",
+    "CLINE_DATA_DIR",
     "OPENROUTER_API_KEY",
     "COMMAND_CODE_API_KEY",
     "COMMANDCODE_API_URL",
@@ -254,6 +257,20 @@ Codex normally uses `~/.codex` as its home. To keep its files in bwai's persiste
 ```
 
 When the broker is enabled, bwai overlays its generated broker guidance as `AGENTS.md` inside `CODEX_HOME` (or `~/.codex` when unset). Codex loads that as global instructions; the overlay does not change the host's Codex files or the project's own `AGENTS.md`. A custom `CODEX_HOME` must be inside the project, your home directory, or `state_root` so it exists within the sandbox. If that location is read-only under your config, bwai leaves it unchanged and reports that broker guidance was not mounted.
+
+### Cline CLI
+
+Launch Cline with `bwai --command cline`, or set `"command": ["cline"]` in the bwai config. Cline keeps provider credentials, settings, sessions and global rules under `~/.cline`, which the default config exposes read-write inside the sandbox — like Codex's `~/.codex`, that includes its API keys, so only use it if you are comfortable making those files available to the agent. If your existing config has an explicit `home_allow` list that excludes `.cline`, add `.cline` to it for saved auth and broker guidance.
+
+To keep Cline's data in bwai's persistent state area instead, point `CLINE_DATA_DIR` at a path under `state_root`:
+
+```json
+{
+  "env_set": { "CLINE_DATA_DIR": "~/.local/share/bwai/cline/data" }
+}
+```
+
+`CLINE_DATA_DIR` replaces `~/.cline/data` only; the global rules stay under `~/.cline/rules`. When the broker is enabled, bwai overlays its generated broker guidance as one more rule file, `~/.cline/rules/bwai.md`. Cline folds every markdown file in that directory into its global rules, so the fragment reaches the model without changing your own rule files, the `~/Documents/Cline/Rules` compatibility directory, or the project's `.clinerules/`. If `~/.cline` is read-only under your config, bwai leaves it unchanged and reports that broker guidance was not mounted.
 
 ### Git worktrees
 
@@ -417,7 +434,7 @@ For a machine dedicated to agents, `bwai broker serve` runs the broker as a long
 
 ### Telling the agent it can call `bwai-outside`
 
-The sandbox is a fresh world — agents need a way to discover `bwai-outside`. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Claude Code and Command Code opt in with a flag or mod, and opencode and Codex load an isolated overlay at their global `AGENTS.md`; `bwai` does not modify the host's agent configuration.
+The sandbox is a fresh world — agents need a way to discover `bwai-outside`. When the broker is enabled, `bwai` writes a fragment describing the tool, **including the current rule set rendered at broker startup**, and exposes it read-only under `/run/bwai/`. So the agent knows what it may and may not run before its first turn, without having to think to run `bwai-outside --list-rules` — that command remains for re-checking live. Claude Code and Command Code opt in with a flag or mod, and opencode, Codex and Cline load an isolated overlay in their global instructions; `bwai` does not modify the host's agent configuration.
 
 **Command Code** reads system-prompt extensions from mods, so `bwai` exposes a tiny mod at `/run/bwai/bwai.ts` that appends the fragment. Start it with:
 
@@ -447,6 +464,8 @@ The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the sing
     Claude reads `/run/bwai/CLAUDE.md` as part of its memory bootstrap and learns it can call `bwai-outside`.
 
 **opencode** needs no opt-in. When the broker is enabled `bwai` overlays a merged `~/.config/opencode/AGENTS.md` inside the sandbox: your host global instructions followed by the bwai fragment. opencode v2 loads instructions only from `AGENTS.md` — it accepts the config `instructions` field but never resolves it — so the overlay is what actually reaches the model. The host file and the project tree are not touched.
+
+**Cline** needs no opt-in either. Cline folds every markdown file under `~/.cline/rules` into its global rules, so `bwai` overlays `~/.cline/rules/bwai.md` inside the sandbox with the bwai fragment, merged with a host file of that name when one exists. Your other rule files, the `~/Documents/Cline/Rules` compatibility directory and the project's `.clinerules/` are not touched.
 
 Inside the sandbox, the agent (or you) can always check what's allowed:
 
