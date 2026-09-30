@@ -40,11 +40,15 @@ replace_ctx() { # path — rewrite the marked block, keeping the rest
 	fi
 }
 
+# One global instructions file per agent. command-code reads its user
+# memory from ~/.commandcode/AGENTS.md; the sandbox reaches the same file
+# with a `--mod` instead, because there it belongs to the host's user.
 for f in \
 	"$HOME/.config/opencode/AGENTS.md" \
 	"$HOME/.claude/CLAUDE.md" \
 	"$HOME/.codex/AGENTS.md" \
-	"$HOME/.cline/rules/bwai.md"; do
+	"$HOME/.cline/rules/bwai.md" \
+	"$HOME/.commandcode/AGENTS.md"; do
 	mkdir -p "$(dirname "$f")"
 	if [[ -e $f ]]; then
 		has_begin=0 has_end=0

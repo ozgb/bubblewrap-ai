@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -337,5 +338,120 @@ func TestInstallBwaiMod(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("bwai.ts missing %q:\n%s", want, s)
 		}
+	}
+}
+
+// agentBoxRefreshScript is the box-side counterpart to
+// installAgentMemoryFile: on an agent box bwai owns the agent user's home,
+// so bwai-refresh-context writes each agent's global instructions there
+// instead of overlaying them inside a sandbox.
+func agentBoxRefreshScript(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.Abs(filepath.Join("..", "..", "scripts", "agent-box", "bwai-refresh-context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestAgentBoxRefreshCoversEveryAgent guards the drift that leaves an agent
+// box without broker guidance: an agent whose global instructions a sandbox
+// wires up has to appear in the box's refresh script too. The paths come
+// from the sandbox's own helpers, so moving one fails here until the script
+// follows it.
+func TestAgentBoxRefreshCoversEveryAgent(t *testing.T) {
+	script, err := os.ReadFile(agentBoxRefreshScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(string(filepath.Separator), "home", "agent")
+	for _, path := range []string{
+		opencodeAgentsPath(home),                         // opencode v2: the global AGENTS.md
+		clineRulesPath(home),                             // Cline: one file among its global rules
+		filepath.Join(home, ".claude", "CLAUDE.md"),      // Claude Code
+		filepath.Join(home, ".codex", "AGENTS.md"),       // Codex: AGENTS.md in CODEX_HOME
+		filepath.Join(home, ".commandcode", "AGENTS.md"), // command-code: user memory
+	} {
+		rel, err := filepath.Rel(home, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `"$HOME/` + filepath.ToSlash(rel) + `"`
+		if !strings.Contains(string(script), want) {
+			t.Errorf("bwai-refresh-context never writes %s (%s), so that agent gets no broker guidance on a box",
+				want, path)
+		}
+	}
+}
+
+// TestAgentBoxRefreshContextWritesEveryAgent runs the box's refresh script
+// against a stub client and a throwaway home. Each agent's global
+// instructions file ends up with the broker block, the agent user's own
+// content survives, a file bwai wrote before the block was marked is
+// replaced, and a second login rewrites the block rather than repeating it.
+func TestAgentBoxRefreshContextWritesEveryAgent(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	script := agentBoxRefreshScript(t)
+	home := t.TempDir()
+	bin := t.TempDir()
+	// The script only checks for the markers and copies what the client
+	// prints, so a stub can stand in for bwai-outside.
+	stub := filepath.Join(bin, "bwai-outside")
+	body := "#!/usr/bin/env bash\n[[ ${1:-} == --context ]] || exit 1\nprintf '%s\\n' '" +
+		brokerBlockBegin + "' 'call bwai-outside for host credentials' '" + brokerBlockEnd + "'\n"
+	if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The agent user's own instructions, and a whole file bwai wrote before
+	// the block was marked (its first line is the fragment's heading).
+	own := opencodeAgentsPath(home)
+	legacy := filepath.Join(home, ".codex", "AGENTS.md")
+	for path, content := range map[string]string{
+		own:    "# my rules\n",
+		legacy: "# bwai broker\nstale guidance\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Two logins: the second must leave one block, not two.
+	for i := 0; i < 2; i++ {
+		cmd := exec.Command("bash", script)
+		cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":" + os.Getenv("PATH")}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("refresh run %d: %v\n%s", i+1, err, out)
+		}
+	}
+
+	for _, path := range []string{
+		filepath.Join(home, ".claude", "CLAUDE.md"),
+		clineRulesPath(home),
+		filepath.Join(home, ".commandcode", "AGENTS.md"),
+		own,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("%s: %v", path, err)
+			continue
+		}
+		if n := strings.Count(string(got), brokerBlockBegin); n != 1 {
+			t.Errorf("%s has %d broker blocks, want 1:\n%s", path, n, got)
+		}
+		if !strings.Contains(string(got), "call bwai-outside for host credentials") {
+			t.Errorf("%s missing the broker block:\n%s", path, got)
+		}
+	}
+	if got, err := os.ReadFile(own); err != nil || !strings.Contains(string(got), "# my rules") {
+		t.Errorf("the agent user's own instructions were lost (err %v):\n%s", err, got)
+	}
+	if got, err := os.ReadFile(legacy); err != nil || strings.Contains(string(got), "stale guidance") {
+		t.Errorf("a file bwai owns should be replaced wholesale (err %v):\n%s", err, got)
 	}
 }

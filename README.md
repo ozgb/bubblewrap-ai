@@ -442,7 +442,7 @@ The sandbox is a fresh world — agents need a way to discover `bwai-outside`. W
 cmd --mod /run/bwai/bwai.ts
 ```
 
-The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the single source of truth. Your own `~/.commandcode/AGENTS.md` is untouched — command-code has no "additional memory directories" setting, and its subdirectory memory only covers files inside the project, so a mod is what makes this opt-in rather than an override.
+The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the single source of truth. Your own `~/.commandcode/AGENTS.md` is untouched — command-code has no "additional memory directories" setting, and its subdirectory memory only covers files inside the project, so a mod is what makes this opt-in rather than an override. On an agent box the same file needs no mod: there it belongs to the agent user, so `bwai-refresh-context` writes the fragment into it as a marked block, like the other agents (see [docs/agent-box.md](docs/agent-box.md)).
 
 **Claude Code** reads CLAUDE.md from additional directories, so `bwai` exposes the fragment at `/run/bwai/CLAUDE.md`. Two pieces to wire it up on the agent side:
 
@@ -465,7 +465,7 @@ The mod reads `/run/bwai/CLAUDE.md` at call time, so the fragment stays the sing
 
 **opencode** needs no opt-in. When the broker is enabled `bwai` overlays a merged `~/.config/opencode/AGENTS.md` inside the sandbox: your host global instructions followed by the bwai fragment. opencode v2 loads instructions only from `AGENTS.md` — it accepts the config `instructions` field but never resolves it — so the overlay is what actually reaches the model. The host file and the project tree are not touched.
 
-**Cline** needs no opt-in either. Cline folds every markdown file under `~/.cline/rules` into its global rules, so `bwai` overlays `~/.cline/rules/bwai.md` inside the sandbox with the bwai fragment, merged with a host file of that name when one exists. Your other rule files, the `~/Documents/Cline/Rules` compatibility directory and the project's `.clinerules/` are not touched.
+**Cline** needs no opt-in either. Cline folds every markdown file under `~/.cline/rules` into its global rules, so `bwai` overlays `~/.cline/rules/bwai.md` inside the sandbox with the bwai fragment, merged with a host file of that name when one exists. Your other rule files, the `~/Documents/Cline/Rules` compatibility directory and the project's `.clinerules/` are not touched. On an agent box `bwai-refresh-context` writes the same `~/.cline/rules/bwai.md` for the agent user.
 
 Inside the sandbox, the agent (or you) can always check what's allowed:
 
