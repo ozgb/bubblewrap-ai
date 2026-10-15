@@ -416,6 +416,18 @@ Treat `confirm` as the last resort rather than the cautious default. Every confi
 
 The rule needs a trailing `**` for the optional remote name, but the wrapper is what makes the tail safe: `push` accepts at most a bare remote name, so the pattern never has to enumerate the bad flags.
 
+### Issue relationships (`gh-safe`)
+
+Issue dependencies and sub-issues are only reachable through `gh api`, and its endpoint is a single token with the issue number inside, so no rule can pin it to one repository short of `gh api **`. `gh-safe` is a third persona, built like `git-safe`, that builds the endpoint on the host from a closed argv:
+
+```sh
+gh-safe -R owner/repo blocked-by 63      # also: block N BLOCKER, unblock N BLOCKER, sub-issues N, add-sub PARENT CHILD
+```
+
+```json
+{ "match": ["gh-safe", "-R", "owner/repo", "**"], "action": "auto_allow" }
+```
+
 ### Signed commits (`git-sign`)
 
 The agent commits with plain `git commit`, and the commit is signed with the host's key. Inside the sandbox, bwai sets git's `gpg.program` and `gpg.ssh.program` to `bwai-gpg` (through `GIT_CONFIG_*` environment config, which outranks every config file). `bwai-gpg` forwards the buffer git wants signed to the broker as `["git-sign"]`; on the host, `bwai git-sign` checks that the buffer is a commit object and signs it with the key, format and program from the host's own git config. The key the sandbox's git names is ignored.

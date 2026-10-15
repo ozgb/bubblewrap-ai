@@ -72,7 +72,8 @@ Then add a `serve` block to `~/.config/bwai/bwai.json`. The rules and
     "rules": [
       { "match": ["git-sign"],              "action": "auto_allow" },
       { "match": ["git-safe", "push", "**"], "action": "auto_allow" },
-      { "match": ["git-safe", "**"],         "action": "auto_deny" }
+      { "match": ["git-safe", "**"],         "action": "auto_deny" },
+      { "match": ["gh-safe", "-R", "you/project", "**"], "action": "auto_allow" }
     ]
   }
 }

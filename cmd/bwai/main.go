@@ -18,7 +18,7 @@ func main() {
 	// argv[0]; name the client after whichever one was invoked so its
 	// errors are not reported under the other's name.
 	prog := filepath.Base(os.Args[0])
-	if prog == "bwai-outside" || prog == "git-safe" || prog == "bwai-gpg" {
+	if prog == "bwai-outside" || prog == "git-safe" || prog == "gh-safe" || prog == "bwai-gpg" {
 		outsideProg = prog
 	}
 	// argv[0] dispatch: when bwai is invoked as `bwai-outside` from
@@ -34,6 +34,9 @@ func main() {
 	// resolves it to.
 	if prog == "git-safe" {
 		os.Exit(runGitSafeClient(os.Args[1:]))
+	}
+	if prog == "gh-safe" {
+		os.Exit(runGhSafeClient(os.Args[1:]))
 	}
 	// `bwai-gpg` is git's signing program inside the sandbox; it forwards
 	// the buffer to the host's `bwai git-sign`.
@@ -55,6 +58,8 @@ func main() {
 			// which is what replaced the old ~/.local/bin/git-safe
 			// symlink.
 			os.Exit(runGitSafe(os.Args[2:]))
+		case "gh-safe":
+			os.Exit(runGhSafe(os.Args[2:]))
 		case "git-sign":
 			os.Exit(runGitSign(os.Args[2:]))
 		case "trust":
@@ -340,6 +345,7 @@ func runSandbox() int {
 			"--bind", broker.BrokerSocketPath(), "/run/bwai/broker.sock",
 			"--ro-bind", helper, "/run/bwai/bin/bwai-outside",
 			"--ro-bind", helper, "/run/bwai/bin/git-safe",
+			"--ro-bind", helper, "/run/bwai/bin/gh-safe",
 			"--ro-bind", helper, "/run/bwai/bin/bwai-gpg",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "CLAUDE.md"), "/run/bwai/CLAUDE.md",
 			"--ro-bind", filepath.Join(broker.TmpDir(), "bwai.ts"), "/run/bwai/bwai.ts",
@@ -729,6 +735,17 @@ force, the protected branches (main/master/trunk/develop plus patterns from
 ` + "`broker.protected_branches`" + `), and any non-fast-forward update. The remote's
 push URL must be listed in ` + "`broker.push_allowed_urls`" + `; an empty list allows
 no push.
+
+Issue dependencies and sub-issues have ` + "`gh-safe`" + `, also on your ` + "`PATH`" + `
+and also called without the prefix. ` + "`gh api`" + ` is not the way to them:
+
+` + "```sh" + `
+gh-safe -R owner/repo blocked-by 63        # issues blocking #63
+gh-safe -R owner/repo block 63 12          # #63 is blocked by #12
+gh-safe -R owner/repo unblock 63 12
+gh-safe -R owner/repo sub-issues 63
+gh-safe -R owner/repo add-sub 63 70        # #70 becomes a sub-issue of #63
+` + "```" + `
 
 Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
 these all succeed without it:

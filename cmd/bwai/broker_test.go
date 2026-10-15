@@ -42,6 +42,11 @@ func TestHostArgv(t *testing.T) {
 			want: []string{self, "git-safe", "push"},
 		},
 		{
+			name: "gh-safe resolves to the broker's own binary",
+			in:   []string{"gh-safe", "-R", "o/r", "blocked-by", "63"},
+			want: []string{self, "gh-safe", "-R", "o/r", "blocked-by", "63"},
+		},
+		{
 			name: "git-sign resolves to the broker's own binary",
 			in:   []string{"git-sign"},
 			want: []string{self, "git-sign"},

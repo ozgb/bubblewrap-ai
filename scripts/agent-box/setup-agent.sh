@@ -13,7 +13,7 @@ install -D -m 0755 "$BIN" "$HOME/.local/bin/bwai"
 # dir so `git-safe` and friends only appear where this file puts them.
 LIBEXEC=$HOME/.local/libexec/bwai
 mkdir -p "$LIBEXEC"
-for p in bwai-outside git-safe bwai-gpg; do
+for p in bwai-outside git-safe gh-safe bwai-gpg; do
 	ln -sf "$HOME/.local/bin/bwai" "$LIBEXEC/$p"
 done
 install -m 0755 "$(dirname "$0")/bwai-refresh-context" "$LIBEXEC/bwai-refresh-context"

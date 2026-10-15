@@ -727,7 +727,7 @@ func hostArgv(argv []string) []string {
 }
 
 // hostSubcommands are the argv[0] names hostArgv resolves to this binary.
-var hostSubcommands = map[string]bool{"git-safe": true, "git-sign": true}
+var hostSubcommands = map[string]bool{"git-safe": true, "gh-safe": true, "git-sign": true}
 
 // resolveCwd checks that a request cwd lies inside the project or one of
 // the extra roots, after resolving symlinks — the agent can plant a link

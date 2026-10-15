@@ -506,6 +506,31 @@ to match literally, but `gh api` is a universal escape hatch (it can
 force-update a ref over REST) and `gh repo sync --force` hard-resets a
 branch. Deny those explicitly rather than leaning on a broad `gh **` rule.
 
+### Issue relationships (`gh-safe`)
+
+Some of what `gh` can do is only reachable through `gh api`: issue
+dependencies and sub-issues have no porcelain. The endpoint is one
+argument with the issue number inside it
+(`repos/o/r/issues/63/dependencies/blocked_by`), and `*` matches a whole
+token, so a rule over it is either one rule per issue or `gh api **`,
+which is every endpoint and every method.
+
+`gh-safe` is a third persona built the same way as `git-safe`: a client in
+the sandbox, and a `bwai gh-safe` subcommand on the host that builds the
+endpoint itself. Its surface is closed: `-R owner/repo` first, then one of
+`blocked-by N`, `block N BLOCKER`, `unblock N BLOCKER`, `sub-issues N`,
+`add-sub PARENT CHILD`, with issues as plain numbers and nothing passed
+through to `gh`. Because the repository is a whole token, the rule can pin
+it:
+
+```json
+{ "match": ["gh-safe", "-R", "owner/repo", "**"], "action": "auto_allow" }
+```
+
+The trailing `**` is only ever a subcommand and its issue numbers. New
+`gh api`-only operations belong in `ghSafeOps`, under the same constraint:
+fixed method and endpoint, numeric arguments only.
+
 ```
 $ bwai broker check git-safe push     # AUTO_ALLOW, rules[0]
 $ bwai broker check git push --force  # AUTO_DENY (implicit — no rule)
