@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
@@ -74,26 +75,34 @@ type BrokerConfig struct {
 	Rules            []Rule    `json:"rules"`
 	Web              WebConfig `json:"web"`
 
-	// PushAllowedURLs is the set of remote URLs `git-safe push` may target,
-	// compared after normalisation. It is a trust anchor rather than an
-	// ordinary setting: the broker injects its own copy into the host-side
-	// push, and a project-local .bwai.json only reaches that copy once it is
-	// trusted, so an edit in the project tree cannot widen it. Empty means
-	// every push is refused.
-	PushAllowedURLs []string `json:"push_allowed_urls"`
-
-	// ProtectedBranches adds branch-name patterns `git-safe push` refuses,
-	// on top of the built-in main/master/trunk/develop. An entry is either an
-	// exact name or a shell glob, so "release-*" or "release/*" covers a
-	// family. The branch being pushed is the destination branch, since the
-	// refspec is always HEAD:refs/heads/<branch>. Like PushAllowedURLs it is
-	// a trust anchor, injected into the push from the broker's own config.
-	ProtectedBranches []string `json:"protected_branches"`
+	// AllowedRemotes are the repositories git-safe may push to, each with
+	// its own policy. A trust anchor rather than an ordinary setting: the
+	// broker injects its own copy into the host-side push, and a
+	// project-local .bwai.json only reaches that copy once it is trusted, so
+	// an edit in the project tree cannot widen it. Empty means every push is
+	// refused.
+	AllowedRemotes []AllowedRemote `json:"allowed_remotes"`
 
 	// Serve configures `bwai broker serve`, the long-running broker for
 	// agents that run as another user rather than inside a bwai sandbox.
 	// Only read from the global config.
 	Serve *ServeConfig `json:"serve,omitempty"`
+}
+
+// AllowedRemote is one push destination and the policy git-safe applies to it.
+type AllowedRemote struct {
+	// URL is compared after normalisation, so scp-, ssh- and https-style
+	// spellings of the same repository match; this spelling is pushed to.
+	URL string `json:"url"`
+
+	// ProtectedBranches adds branch-name patterns `git-safe push` refuses,
+	// on top of the built-in main/master/trunk/develop. An entry is an
+	// exact name or a shell glob ("release-*", "release/*").
+	ProtectedBranches []string `json:"protected_branches"`
+
+	// TagPatterns names the tags `git-safe push-tag` may publish, as exact
+	// names or shell globs ("v*"). Empty means no tag may be pushed.
+	TagPatterns []string `json:"tag_patterns"`
 }
 
 // ServeConfig is the daemon's socket and the agents it answers.
@@ -297,6 +306,16 @@ func applyConfigData(cfg *Config, data []byte, path string, merge bool) error {
 		prevPath = append([]string(nil), cfg.PathPrepend...)
 		prevRules = cloneRules(cfg.Broker.Rules)
 	}
+	for _, old := range []string{"push_allowed_urls", "protected_branches", "tag_patterns"} {
+		if brokerKeyPresent(keys, old) {
+			return fmt.Errorf("%s: broker.%s has moved into broker.allowed_remotes entries", path, old)
+		}
+	}
+	// json.Unmarshal decodes into a slice's existing elements, so a layer's
+	// entry would inherit fields it omits from the base entry at its index.
+	if brokerKeyPresent(keys, "allowed_remotes") {
+		cfg.Broker.AllowedRemotes = nil
+	}
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
@@ -386,6 +405,17 @@ func validateConfig(cfg *Config) error {
 		if err := validateRule(r); err != nil {
 			return fmt.Errorf("broker.rules[%d]: %w", i, err)
 		}
+	}
+	seen := map[string]bool{}
+	for i, r := range cfg.Broker.AllowedRemotes {
+		if strings.TrimSpace(r.URL) == "" {
+			return fmt.Errorf("broker.allowed_remotes[%d]: url is required", i)
+		}
+		norm := normalizeRemoteURL(r.URL)
+		if seen[norm] {
+			return fmt.Errorf("broker.allowed_remotes[%d]: %s is listed twice", i, r.URL)
+		}
+		seen[norm] = true
 	}
 	// The web approval page is reachable from the sandbox (it shares the
 	// host network namespace), so the token is the only authorizer.

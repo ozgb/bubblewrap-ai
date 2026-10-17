@@ -195,7 +195,7 @@ For sub-paths (entries containing a `/`), `home_allow` is applied after `home_bl
 
 ### Project-local config
 
-A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended), `env_set` (a map, merged per key), and `broker.rules` (appended, base first) — are added to the base, so a project only names what it adds. Because rule matching is first-match, base rules keep precedence and a project's rules extend the set rather than shadowing it. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags) and the trust-anchor lists `broker.push_allowed_urls` and `broker.protected_branches` (a project may narrow them). A missing local file is ignored.
+A `.bwai.json` in the directory you run `bwai` from is layered on top of the base config (the global `~/.config/bwai/bwai.json`, or `--config` if given). Its **set-like fields** — `home_allow`, `home_block`, `env_allow`, and `path_prepend` (lists, appended), `env_set` (a map, merged per key), and `broker.rules` (appended, base first) — are added to the base, so a project only names what it adds. Because rule matching is first-match, base rules keep precedence and a project's rules extend the set rather than shadowing it. Everything else overrides the base value, including the argv lists `command` and `bwrap_extra_args` (appending those would reorder or duplicate flags) and the trust-anchor list `broker.allowed_remotes` (replaced whole, so a project may narrow it). A missing local file is ignored.
 
 The local file sits in the tree the agent can write, and it is read the next time `bwai` starts there, so it is only applied once you have trusted its exact contents:
 
@@ -203,7 +203,7 @@ The local file sits in the tree the agent can write, and it is read the next tim
 bwai trust            # ./.bwai.json; or `bwai trust path/to/.bwai.json`
 ```
 
-The broker follows config edits during a session: when the global config, the local `.bwai.json` or `trusted.json` changes, it reloads the rules, `push_allowed_urls`, `protected_branches` and the approval timeout within a couple of seconds, and re-renders the rule list in `/run/bwai/CLAUDE.md` (an agent that already read it will not notice until it looks again; `bwai-outside --list-rules` is always live). The same trust rule applies: if a local file that was in use is edited and not re-trusted, the reload is refused and the previous config stays, with a desktop notification. Mounts, `home_allow` and the environment are fixed when the sandbox starts.
+The broker follows config edits during a session: when the global config, the local `.bwai.json` or `trusted.json` changes, it reloads the rules, `allowed_remotes` and the approval timeout within a couple of seconds, and re-renders the rule list in `/run/bwai/CLAUDE.md` (an agent that already read it will not notice until it looks again; `bwai-outside --list-rules` is always live). The same trust rule applies: if a local file that was in use is edited and not re-trusted, the reload is refused and the previous config stays, with a desktop notification. Mounts, `home_allow` and the environment are fixed when the sandbox starts.
 
 `bwai trust` prints the file and records its sha256 in `~/.config/bwai/trusted.json`, which the sandbox cannot write. An untrusted or since-edited file is skipped with a notice, so an agent cannot write itself a wider sandbox — `bwrap_path`, `home_allow: [".ssh"]`, `auto_allow` rules — for its next session.
 
@@ -382,32 +382,42 @@ The answer is a wrapper with a closed argument surface. `git-safe` is built from
 ```sh
 git-safe push            # current branch to origin
 git-safe push backup     # current branch to the `backup` remote
+git-safe push-tag v1.2   # one existing tag to origin
 ```
 
 In the sandbox `git-safe` is only a client: it forwards `["git-safe", …]` to the broker and decides nothing itself. The policy runs on the host, as the `bwai git-safe` subcommand the broker resolves the request to. That split is load-bearing — the agent can reach anything the sandbox can reach, so a check performed inside the sandbox would be advisory only.
 
 `git-safe push` never runs git in the agent's repository. It reads the branch and the remote's push URL from the git dir as plain files, fetches the branch into a host-owned mirror (`~/.local/share/bwai-broker/mirrors/`, hidden from the sandbox by a tmpfs), and pushes from there. `git upload-pack` — the server half of that fetch — is the one git command designed to be safe against an untrusted repository, so the agent's hooks and config never run. A `.git` that is a symlink, a gitdir pointer out of the sandbox's writable roots, and object alternates are refused. On success the sandbox-side client updates `refs/remotes/<remote>/<branch>` and the upstream itself.
 
-It pushes the current branch and refuses everything else: no flags, no refspecs, no detached HEAD, no protected branch, and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push. It takes an optional remote name (default `origin`), but the name proves nothing: the sandbox owns `.git/config` and can retarget any remote, so the *push URL* is what gets authorised against `broker.push_allowed_urls`. The broker injects its own copy of that list into the host-side push, and a project-local `.bwai.json` only reaches that copy once you have trusted it, so editing the project tree cannot widen it. An empty list allows no push.
+It pushes the current branch and refuses everything else: no flags, no refspecs, no detached HEAD, no protected branch, and no non-fast-forward update — it fetches the remote tip and requires it to be an ancestor of `HEAD` before pushing, so a destructive push is impossible by construction. The remote branch is created on the first push. It takes an optional remote name (default `origin`), but the name proves nothing: the sandbox owns `.git/config` and can retarget any remote, so the *push URL* is what gets authorised against the `url` of an entry in `broker.allowed_remotes`. The broker injects its own copy of that list into the host-side push, and a project-local `.bwai.json` only reaches that copy once you have trusted it, so editing the project tree cannot widen it. An empty list allows no push.
 
-The protected set is the built-in `main`/`master`/`trunk`/`develop` plus any patterns in `broker.protected_branches`. A pattern is an exact branch name or a shell glob (`release-*`, `release/*`), and because the refspec is always `HEAD:refs/heads/<branch>`, protecting the branch you are on protects the destination branch on every remote.
+Each entry carries its own policy. The protected set is the built-in `main`/`master`/`trunk`/`develop` plus the entry's `protected_branches`. A pattern is an exact branch name or a shell glob (`release-*`, `release/*`), and because the refspec is always `HEAD:refs/heads/<branch>`, protecting the branch you are on protects the destination branch on every remote.
 
 ```json
 {
   "broker": {
-    "push_allowed_urls": ["git@github.com:CubeB/RWE-B4.git"],
-    "protected_branches": ["release-*"]
+    "allowed_remotes": [
+      {
+        "url": "git@github.com:CubeB/RWE-B4.git",
+        "protected_branches": ["release-*"],
+        "tag_patterns": ["v*"]
+      },
+      { "url": "git@github.com:CubeB/scratch.git" }
+    ]
   }
 }
 ```
 
-Entries are remote URLs and branch patterns, and both sides are normalised before comparison, so `git@github.com:CubeB/RWE-B4.git` and `https://github.com/CubeB/RWE-B4` are the same URL entry.
+`git-safe push-tag [<remote>] <tag>` publishes a tag the agent created with plain `git tag`. The name must match the entry's `tag_patterns` (empty or absent: no tag), the tagged commit must already be on a protected branch of the remote — so the agent can tag a release but not choose its contents — and a tag already on the remote is never moved. Signed tags are not supported. See [docs/broker.md](docs/broker.md#tags-git-safe-push-tag).
+
+URLs are normalised on both sides before comparison, so `git@github.com:CubeB/RWE-B4.git` and `https://github.com/CubeB/RWE-B4` are the same entry; listing one repository twice is a config error. The old top-level `push_allowed_urls`, `protected_branches` and `tag_patterns` keys are rejected with a pointer to `allowed_remotes`.
 
 That reduces the broker rules to:
 
 ```json
-{ "match": ["git-safe", "push", "**"], "action": "auto_allow" },
-{ "match": ["git-safe", "**"],         "action": "auto_deny" }
+{ "match": ["git-safe", "push", "**"],     "action": "auto_allow" },
+{ "match": ["git-safe", "push-tag", "**"], "action": "auto_allow" },
+{ "match": ["git-safe", "**"],             "action": "auto_deny" }
 ```
 
 Note the action: **`auto_allow`, not `confirm`.** That is the payoff of moving the policy into the wrapper. A rule over raw `git push` needs a human because the pattern cannot express the check that matters; `git-safe` carries the check itself, so the ancestry decision is already made in code before git runs. A prompt would add nothing — an approver reading `git-safe push` learns only what the rule already told them — and an approval that is always granted is worse than none, because it trains the habit of approving without reading.

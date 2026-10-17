@@ -12,7 +12,7 @@ func TestSessionReloader(t *testing.T) {
 	base := filepath.Join(dir, "base.json")
 	local := filepath.Join(dir, ".bwai.json")
 	writeFile(t, base, `{"broker":{"rules":[{"match":["git-sign"],"action":"auto_allow"}]}}`)
-	writeFile(t, local, `{"broker":{"push_allowed_urls":["https://github.com/o/narrow"]}}`)
+	writeFile(t, local, `{"broker":{"allowed_remotes":[{"url":"https://github.com/o/narrow"}]}}`)
 	silenceStdio(t, func() { runTrust([]string{local}) })
 
 	cfg, state, err := loadProjectConfig(base, local)
@@ -28,7 +28,7 @@ func TestSessionReloader(t *testing.T) {
 	if _, err := reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if got := b.conf(); len(got.Rules) != 2 || !slices.Equal(got.PushAllowedURLs, []string{"https://github.com/o/narrow"}) {
+	if got := b.conf(); len(got.Rules) != 2 || !slices.Equal(remoteURLs(got), []string{"https://github.com/o/narrow"}) {
 		t.Fatalf("after a global edit: %+v", got)
 	}
 	if len(rendered) != 2 {
@@ -38,11 +38,11 @@ func TestSessionReloader(t *testing.T) {
 	// An untrusted edit to an applied local file keeps the previous config,
 	// rather than falling back to global-only (which would drop the narrowed
 	// push list).
-	writeFile(t, local, `{"broker":{"push_allowed_urls":["https://github.com/o/narrow","https://evil.example/x"]}}`)
+	writeFile(t, local, `{"broker":{"allowed_remotes":[{"url":"https://github.com/o/narrow"},{"url":"https://evil.example/x"}]}}`)
 	if _, err := reload(); err == nil {
 		t.Fatal("an untrusted local edit must not reload")
 	}
-	if got := b.conf().PushAllowedURLs; !slices.Equal(got, []string{"https://github.com/o/narrow"}) {
+	if got := remoteURLs(b.conf()); !slices.Equal(got, []string{"https://github.com/o/narrow"}) {
 		t.Fatalf("push list changed to %v after an untrusted edit", got)
 	}
 
@@ -51,7 +51,7 @@ func TestSessionReloader(t *testing.T) {
 	if _, err := reload(); err != nil {
 		t.Fatalf("reload after trust: %v", err)
 	}
-	if got := b.conf().PushAllowedURLs; len(got) != 2 {
+	if got := remoteURLs(b.conf()); len(got) != 2 {
 		t.Fatalf("trusted edit not applied: %v", got)
 	}
 }
@@ -74,4 +74,12 @@ func TestSessionReloader_UntrustedFromTheStart(t *testing.T) {
 	if len(rules) != 1 || rules[0].Match[0] != "gh" {
 		t.Fatalf("rules = %v, want the global edit without the untrusted local rule", rules)
 	}
+}
+
+func remoteURLs(c BrokerConfig) []string {
+	var urls []string
+	for _, r := range c.AllowedRemotes {
+		urls = append(urls, r.URL)
+	}
+	return urls
 }

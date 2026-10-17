@@ -153,23 +153,24 @@ func TestNormalizeRemoteURL(t *testing.T) {
 }
 
 func TestURLAllowed(t *testing.T) {
-	allowed := []string{"git@github.com:CubeB/RWE-B4.git"}
+	allowed := []AllowedRemote{{URL: "git@github.com:CubeB/RWE-B4.git", TagPatterns: []string{"v*"}}}
 	// The same repository spelled three ways all match the one entry.
 	for _, raw := range []string{
 		"git@github.com:CubeB/RWE-B4.git",
 		"https://github.com/CubeB/RWE-B4",
 		"ssh://git@github.com/CubeB/RWE-B4.git",
 	} {
-		if allowedEntry(normalizeRemoteURL(raw), allowed) == "" {
-			t.Errorf("%q should match the allowlist", raw)
+		got, ok := allowedEntry(normalizeRemoteURL(raw), allowed)
+		if !ok || got.URL != allowed[0].URL || !slices.Equal(got.TagPatterns, allowed[0].TagPatterns) {
+			t.Errorf("%q should match the allowlist entry, got %+v", raw, got)
 		}
 	}
 	// A different repository does not, even on the same host.
-	if allowedEntry(normalizeRemoteURL("git@github.com:attacker/exfil.git"), allowed) != "" {
+	if _, ok := allowedEntry(normalizeRemoteURL("git@github.com:attacker/exfil.git"), allowed); ok {
 		t.Error("an unrelated repository must not match the allowlist")
 	}
 	// An empty allowlist allows nothing.
-	if allowedEntry(normalizeRemoteURL("git@github.com:CubeB/RWE-B4.git"), nil) != "" {
+	if _, ok := allowedEntry(normalizeRemoteURL("git@github.com:CubeB/RWE-B4.git"), nil); ok {
 		t.Error("an empty allowlist must refuse everything")
 	}
 }
@@ -190,12 +191,12 @@ func TestBranchProtected(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.branch, func(t *testing.T) {
-			if got := branchProtected(tc.branch, patterns); got != tc.want {
-				t.Fatalf("branchProtected(%q) = %v, want %v", tc.branch, got, tc.want)
+			if got := matchesAny(tc.branch, patterns); got != tc.want {
+				t.Fatalf("matchesAny(%q) = %v, want %v", tc.branch, got, tc.want)
 			}
 		})
 	}
-	if branchProtected("anything", nil) {
+	if matchesAny("anything", nil) {
 		t.Fatal("no patterns must protect nothing")
 	}
 }
@@ -210,6 +211,9 @@ func TestRunGitSafeArgs(t *testing.T) {
 		{"unknown subcommand", []string{"force-push"}, 2},
 		{"push flags are rejected", []string{"push", "--force"}, 2},
 		{"push refspec is rejected", []string{"push", "origin", "+main"}, 2},
+		{"push-tag needs a tag", []string{"push-tag"}, 2},
+		{"push-tag flags are rejected", []string{"push-tag", "--force"}, 2},
+		{"push-tag refspec is rejected", []string{"push-tag", "origin", "+v1:v1"}, 2},
 		// Only argv shapes that fail before any git process is started
 		// belong here — a valid `commit -m x` would commit in the test's
 		// own working copy.
@@ -251,7 +255,7 @@ func TestGitSafePushIntegration(t *testing.T) {
 	gitRun(t, work, "remote", "add", "backup", other)
 	// The broker injects these; the tests stand in for it. origin is the
 	// only authorised URL unless a subtest widens it.
-	t.Setenv(pushAllowedEnv, origin)
+	setAllowedRemotes(t, AllowedRemote{URL: origin})
 	t.Setenv(requestCwdEnv, work)
 	t.Setenv(allowedRootsEnv, root)
 	if err := os.WriteFile(filepath.Join(work, "a.txt"), []byte("a\n"), 0o644); err != nil {
@@ -350,7 +354,7 @@ func TestGitSafePushIntegration(t *testing.T) {
 	})
 
 	t.Run("pushes to an allowlisted non-origin remote", func(t *testing.T) {
-		t.Setenv(pushAllowedEnv, other)
+		setAllowedRemotes(t, AllowedRemote{URL: origin}, AllowedRemote{URL: other})
 		if code := pushTo(t, "backup"); code != 0 {
 			t.Fatalf("allowlisted-backup push exit %d, want 0", code)
 		}
@@ -414,7 +418,7 @@ func TestGitSafePushIntegration(t *testing.T) {
 	})
 
 	t.Run("refuses a configured protected-branch glob", func(t *testing.T) {
-		t.Setenv(protectedBranchesEnv, "release-*")
+		setAllowedRemotes(t, AllowedRemote{URL: origin, ProtectedBranches: []string{"release-*"}})
 		gitRun(t, work, "checkout", "-q", "-b", "release-1.0", "main")
 		if code := push(t); code != 1 {
 			t.Fatalf("protected-glob push exit %d, want 1", code)
@@ -567,4 +571,10 @@ func silenceStdio(t *testing.T, fn func()) {
 	os.Stdout, os.Stderr = devNull, devNull
 	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
 	fn()
+}
+
+// setAllowedRemotes stands in for the broker, which injects its allowlist.
+func setAllowedRemotes(t *testing.T, remotes ...AllowedRemote) {
+	t.Helper()
+	t.Setenv(allowedRemotesEnv, allowedRemotesJSON(remotes))
 }

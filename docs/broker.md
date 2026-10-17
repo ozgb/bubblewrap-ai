@@ -230,7 +230,6 @@ persisting it would erode the explicit-config security model.
       { "match": ["git", "push", "--force", "**"], "action": "auto_deny" },
       { "match": ["git", "push", "**"],            "action": "confirm" },
       { "match": ["git", "commit", "**"],          "action": "confirm" },
-      { "match": ["git", "tag", "-s", "**"],       "action": "confirm" },
 
       { "match": ["git", "status"],                "action": "auto_allow" },
       { "match": ["git", "log", "**"],             "action": "auto_allow" },
@@ -376,8 +375,9 @@ guarantee. So the commands that need a real judgement call live behind a
 literal argv:
 
 ```json
-{ "match": ["git-safe", "push", "**"], "action": "auto_allow" },
-{ "match": ["git-safe", "**"],         "action": "auto_deny" }
+{ "match": ["git-safe", "push", "**"],     "action": "auto_allow" },
+{ "match": ["git-safe", "push-tag", "**"], "action": "auto_allow" },
+{ "match": ["git-safe", "**"],             "action": "auto_deny" }
 ```
 
 `git-safe` is an argv[0] persona of the `bwai` binary, like
@@ -410,11 +410,11 @@ most one remote name — and enforces the policy in code:
   (`BWAI_ALLOWED_ROOTS`), and object alternates;
 - refuses a detached HEAD;
 - refuses the protected branches — the built-in `main`, `master`, `trunk`,
-  `develop` plus any patterns in `broker.protected_branches` (exact names or
+  `develop` plus the remote entry's `protected_branches` (exact names or
   shell globs such as `release-*`, `release/*`);
 - pushes only the current branch;
 - authorizes the **push URL** of the chosen remote against
-  `broker.push_allowed_urls` (default remote `origin`), because the sandbox
+  an entry's `url` in `broker.allowed_remotes` (default remote `origin`), because the sandbox
   owns `.git/config` and can retarget any remote — the remote name is not a
   boundary;
 - fetches the remote tip and requires it to be an **ancestor of HEAD**
@@ -425,15 +425,26 @@ most one remote name — and enforces the policy in code:
 - leaves the agent's repository alone afterwards: the sandbox-side client
   updates the remote-tracking ref and upstream with the sandbox's git.
 
-The allowlist and the protected-branch list are trust anchors, not ordinary
-settings: the broker injects its own copies into the host-side push (as
-`BWAI_PUSH_ALLOWED` and `BWAI_PROTECTED_BRANCHES`), and those copies only
-change when the broker reloads its config — which takes a project-local
-`.bwai.json` in only once it is trusted, so an edit in the project tree
-cannot widen them. An empty URL list allows no push;
-the built-in protected branches are always in force. URL entries are
-normalised before comparison, so `git@github.com:o/r.git` and
-`https://github.com/o/r` are the same entry.
+`broker.allowed_remotes` is a trust anchor, not an ordinary setting. Each
+entry is one repository and the policy for it:
+
+```json
+"allowed_remotes": [
+  { "url": "git@github.com:o/r.git", "protected_branches": ["release-*"], "tag_patterns": ["v*"] },
+  { "url": "git@github.com:o/scratch.git" }
+]
+```
+
+The broker injects its own copy into the host-side push (as JSON in
+`BWAI_ALLOWED_REMOTES`), and that copy only changes when the broker reloads
+its config — which takes a project-local `.bwai.json` in only once it is
+trusted, so an edit in the project tree cannot widen it. A layer's list
+replaces the base list whole. An empty list allows no push; the built-in
+protected branches are always in force. URLs are normalised before
+comparison, so `git@github.com:o/r.git` and `https://github.com/o/r` are
+the same entry, and listing a repository twice is a config error. The
+retired top-level `push_allowed_urls`, `protected_branches` and
+`tag_patterns` keys are rejected rather than ignored.
 
 The ancestry check is the part a deny-list cannot express: it makes a
 destructive push impossible by construction — a property of the commit
@@ -442,6 +453,33 @@ graph — rather than by blacklisting flags.
 The rule carries a trailing `**` for the optional remote name. That is the
 one loose spot in the pattern, and the wrapper is what keeps it meaningful:
 the tail can only ever be a bare remote name.
+
+### Tags (`git-safe push-tag`)
+
+`git-safe push-tag [<remote>] <tag>` publishes one existing local tag,
+lightweight or annotated. The agent creates the tag with plain `git tag` —
+it is its own repository — and only the publish crosses the boundary. It
+shares push's mechanics (files read as files, upload-pack into the
+mirror, the push URL matched to an `allowed_remotes` entry) and adds
+its own policy (`planPushTag`):
+
+- the name must match that entry's `tag_patterns` — exact names or globs
+  such as `v*` — and an empty or absent list allows no tag;
+- the tagged commit must already be on a **protected branch** of the
+  remote (the built-ins plus the entry's `protected_branches`). The agent cannot push to those, so it can mark a release but not
+  decide what goes into one — the same graph-shaped guarantee as push's
+  ancestry check, and the reason the rule is `auto_allow`;
+- a tag already on the remote is never moved or deleted: the same object
+  again is a no-op, anything else is refused. The refspec is
+  `<object>:refs/tags/<tag>`, with no `+` and no `--force`;
+- an annotated tag whose object names a different tag is refused, so
+  `v1.0`'s message cannot be published as `v2.0`.
+
+Signed tags are not supported: `git-sign` signs only commits.
+
+```json
+{ "broker": { "allowed_remotes": [{ "url": "git@github.com:o/r.git", "tag_patterns": ["v*"] }] } }
+```
 
 ### Signing (`git-sign`)
 

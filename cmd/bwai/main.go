@@ -727,14 +727,18 @@ call it directly, with no ` + "`bwai-outside`" + ` prefix:
 
 ` + "```sh" + `
 git-safe push [<remote>]      # publishes the current branch (fast-forward only)
+git-safe push-tag [<remote>] <tag>   # publishes one tag you made with git tag
 ` + "```" + `
 
 ` + "`bwai-outside git push`" + ` is deliberately not allowed. ` + "`git-safe push`" + `
 pushes the current branch to the given remote (default ` + "`origin`" + `) and refuses
-force, the protected branches (main/master/trunk/develop plus patterns from
-` + "`broker.protected_branches`" + `), and any non-fast-forward update. The remote's
-push URL must be listed in ` + "`broker.push_allowed_urls`" + `; an empty list allows
-no push.
+force, the protected branches (main/master/trunk/develop plus the remote's
+` + "`protected_branches`" + `), and any non-fast-forward update. The remote's push URL
+must be an entry in ` + "`broker.allowed_remotes`" + `; an empty list allows no push.
+` + "`git-safe push-tag`" + ` publishes a tag whose name matches that entry's
+` + "`tag_patterns`" + ` and whose commit is already on a protected branch of the
+remote; a published tag is never moved. Signed tags (` + "`git tag -s`" + `) are not
+supported.
 
 Issue dependencies and sub-issues have ` + "`gh-safe`" + `, also on your ` + "`PATH`" + `
 and also called without the prefix. ` + "`gh api`" + ` is not the way to them:

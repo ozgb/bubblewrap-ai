@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -16,15 +17,24 @@ const gitSafeUsage = `git-safe — a deliberately narrow git wrapper for the bwa
 Usage:
   git-safe push [<remote>]  Push the current branch to <remote> (default
                             origin), fast-forward only.
+  git-safe push-tag [<remote>] <tag>
+                            Push one tag to <remote> (default origin).
 
 git-safe push accepts at most one remote name — no flags, no refspecs, no
 URL. The remote is trusted only as far as its push URL appears in the
-broker's push_allowed_urls: the sandbox owns .git/config and can retarget
+broker's allowed_remotes: the sandbox owns .git/config and can retarget
 any remote, so the URL, not the name, is what gets authorised. It refuses
 a detached HEAD and the protected branches — the built-in main, master,
-trunk, develop plus any patterns in broker.protected_branches — and never
+trunk, develop plus the remote entry's protected_branches — and never
 performs a non-fast-forward update: the remote's tip must be an ancestor
 of HEAD. The remote branch is created if it does not exist yet.
+
+git-safe push-tag publishes an existing local tag (lightweight or
+annotated) to an allowlisted remote. The tag name must match the remote
+entry's tag_patterns (empty: no tag may be pushed), its commit must already
+be on a protected branch of the remote, and a tag already on the remote is
+never moved: pushing the same tag again is a no-op, a different one is
+refused.
 
 To commit, run git commit directly: it is signed with the host's key
 through the broker (git's gpg.program is bwai-gpg inside the sandbox).
@@ -39,9 +49,8 @@ a short argv: ["git-safe", "push", "**"].`
 // repository's hooks and config.
 const gitSafeCommitRemoved = "git-safe: `git-safe commit` has been removed; run `git commit` directly — it is signed through the broker automatically"
 
-// defaultProtectedBranches are always refused, independent of config, so a
-// config mistake cannot open the canonical branches. Configured patterns
-// (broker.protected_branches) are added on top of these.
+// defaultProtectedBranches are always refused, on every remote; an
+// allowed_remotes entry's protected_branches are added on top.
 var defaultProtectedBranches = []string{"main", "master", "trunk", "develop"}
 
 // runGitSafeClient is the sandbox-side half of git-safe, reached when
@@ -124,6 +133,8 @@ func runGitSafe(args []string) int {
 	switch args[0] {
 	case "push":
 		return runGitSafePush(args[1:])
+	case "push-tag":
+		return runGitSafePushTag(args[1:])
 	case "commit":
 		fmt.Fprintln(os.Stderr, gitSafeCommitRemoved)
 		return 2
@@ -150,50 +161,21 @@ func runGitSafePush(args []string) int {
 		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
 		return 2
 	}
-	cwd := os.Getenv(requestCwdEnv)
-	if cwd == "" {
-		if cwd, err = os.Getwd(); err != nil {
-			fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
-			return 1
-		}
-	}
-	repo, err := locateRepo(cwd, allowedRoots())
+	repo, target, err := resolvePushTarget(remote)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: %v\n", err)
+		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
 		return 1
 	}
+	dest := target.URL
 	branch, err := repo.branch()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: %v\n", err)
 		return 1
 	}
 
-	protected, err := protectedBranchPatterns()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
-		return 1
-	}
-	if branchProtected(branch, protected) {
+	protected := protectedBranchPatterns(target)
+	if matchesAny(branch, protected) {
 		fmt.Fprintf(os.Stderr, "git-safe: refusing to push protected branch %q\n", branch)
-		return 1
-	}
-
-	// The sandbox owns .git/config, so a remote name proves nothing: the
-	// push URL it resolves to only selects an allowlist entry, and the
-	// entry's own spelling is what gets pushed to.
-	rawURL, err := repo.pushURL(remote)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: %v\n", err)
-		return 1
-	}
-	allowed, err := pushAllowedURLs()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "git-safe: %v\n", err)
-		return 1
-	}
-	dest := allowedEntry(normalizeRemoteURL(rawURL), allowed)
-	if dest == "" {
-		fmt.Fprintf(os.Stderr, "git-safe: refusing to push: remote %q (%s) is not in push_allowed_urls\n", remote, rawURL)
 		return 1
 	}
 
@@ -208,17 +190,7 @@ func runGitSafePush(args []string) int {
 		_, _ = mirrorGit(mirror, "update-ref", "-d", incoming)
 		_, _ = mirrorGit(mirror, "update-ref", "-d", tracking)
 	}()
-	// safe.directory is scoped to this fetch: it lets upload-pack serve a
-	// repository owned by another user (the agent box), and upload-pack
-	// reads that repository without executing anything from it.
-	// --update-shallow accepts a branch from a shallow clone; without it
-	// git drops the ref with only a warning and still exits 0.
-	out, err := mirrorGit(mirror,
-		"-c", "safe.directory="+repo.commonDir,
-		"-c", "safe.directory="+repo.workTree,
-		"-c", "transfer.fsckObjects=true",
-		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--update-shallow",
-		repo.commonDir, "+refs/heads/"+branch+":"+incoming)
+	out, err := fetchFromRepo(mirror, repo, "refs/heads/"+branch, incoming)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "git-safe: cannot read branch %q from the repository: %v\n%s", branch, err, out)
 		return 1
@@ -253,6 +225,38 @@ func runGitSafePush(args []string) int {
 	}
 	fmt.Printf("git-safe: pushed %s to %s/%s\n", sha[:12], remote, branch)
 	return 0
+}
+
+// resolvePushTarget locates the agent's repository from the request cwd and
+// returns the allowed_remotes entry its remote's push URL matches. The
+// sandbox owns .git/config, so a remote name proves nothing: the push URL it
+// resolves to only selects an entry, and the entry's own spelling is what
+// gets pushed to.
+func resolvePushTarget(remote string) (*hostRepo, AllowedRemote, error) {
+	cwd := os.Getenv(requestCwdEnv)
+	if cwd == "" {
+		var err error
+		if cwd, err = os.Getwd(); err != nil {
+			return nil, AllowedRemote{}, err
+		}
+	}
+	repo, err := locateRepo(cwd, allowedRoots())
+	if err != nil {
+		return nil, AllowedRemote{}, fmt.Errorf("refusing to push: %w", err)
+	}
+	rawURL, err := repo.pushURL(remote)
+	if err != nil {
+		return nil, AllowedRemote{}, fmt.Errorf("refusing to push: %w", err)
+	}
+	allowed, err := allowedRemotes()
+	if err != nil {
+		return nil, AllowedRemote{}, err
+	}
+	target, ok := allowedEntry(normalizeRemoteURL(rawURL), allowed)
+	if !ok {
+		return nil, AllowedRemote{}, fmt.Errorf("refusing to push: remote %q (%s) is not in allowed_remotes", remote, rawURL)
+	}
+	return repo, target, nil
 }
 
 // remoteNameRe matches the remote names git accepts. Anchored on an
@@ -293,7 +297,7 @@ func planPush(branch, remote, dest, sha string, remoteExists, fastForward bool, 
 	if branch == "" {
 		return nil, fmt.Errorf("refusing to push: no branch is checked out")
 	}
-	if branchProtected(branch, protected) {
+	if matchesAny(branch, protected) {
 		return nil, fmt.Errorf("refusing to push protected branch %q", branch)
 	}
 	if remoteExists && !fastForward {
@@ -306,29 +310,33 @@ func planPush(branch, remote, dest, sha string, remoteExists, fastForward bool, 
 	return []string{"git", "push", dest, sha + ":refs/heads/" + branch}, nil
 }
 
-// pushAllowedEnv carries the broker's push allowlist to the host-side
-// push. The broker's in-memory config authorises, not an on-disk read:
-// the project tree is writable inside the sandbox, and the broker only
+// allowedRemotesEnv carries the broker's allowed_remotes, as JSON, to the
+// host-side push. The broker's in-memory config authorises, not an on-disk
+// read: the project tree is writable inside the sandbox, and the broker only
 // takes a .bwai.json in once it is trusted.
-const pushAllowedEnv = "BWAI_PUSH_ALLOWED"
+const allowedRemotesEnv = "BWAI_ALLOWED_REMOTES"
 
-// pushAllowedURLs returns the allowlist. The broker always sets the env var
-// (empty when nothing is allowed); its presence is authoritative, so an
-// in-sandbox invocation can never fall through to a file. When the var is
-// absent — git-safe run by hand on the host — only the host-global config is
-// consulted, never the project-local .bwai.json in the sandbox-writable tree.
-func pushAllowedURLs() ([]string, error) {
-	if v, ok := os.LookupEnv(pushAllowedEnv); ok {
+// allowedRemotes returns the push allowlist. The broker always sets the env
+// var; its presence is authoritative, so an in-sandbox invocation can never
+// fall through to a file. When the var is absent — git-safe run by hand on
+// the host — only the host-global config is consulted, never the
+// project-local .bwai.json in the sandbox-writable tree.
+func allowedRemotes() ([]AllowedRemote, error) {
+	if v, ok := os.LookupEnv(allowedRemotesEnv); ok {
 		if v == "" {
 			return nil, nil
 		}
-		return strings.Split(v, "\n"), nil
+		var remotes []AllowedRemote
+		if err := json.Unmarshal([]byte(v), &remotes); err != nil {
+			return nil, fmt.Errorf("%s: %w", allowedRemotesEnv, err)
+		}
+		return remotes, nil
 	}
 	cfg, err := loadConfig(defaultConfigPath())
 	if err != nil {
 		return nil, err
 	}
-	return cfg.Broker.PushAllowedURLs, nil
+	return cfg.Broker.AllowedRemotes, nil
 }
 
 // normalizeRemoteURL reduces the spellings git accepts to a canonical
@@ -359,58 +367,55 @@ func normalizeRemoteURL(raw string) string {
 	return strings.ToLower(host) + "/" + path
 }
 
-// allowedEntry returns the allowlist entry that normalises to norm, or "".
+// allowedEntry returns the allowed remote whose URL normalises to norm.
 // Each entry is normalised the same way, so the two sides need not be
 // spelled alike.
-func allowedEntry(norm string, allowed []string) string {
+func allowedEntry(norm string, allowed []AllowedRemote) (AllowedRemote, bool) {
 	for _, a := range allowed {
-		if normalizeRemoteURL(a) == norm {
-			return a
+		if normalizeRemoteURL(a.URL) == norm {
+			return a, true
 		}
 	}
-	return ""
+	return AllowedRemote{}, false
 }
 
-// protectedBranchesEnv carries the broker's configured protected-branch
-// patterns, passed alongside pushAllowedEnv and for the same reason.
-const protectedBranchesEnv = "BWAI_PROTECTED_BRANCHES"
-
-// protectedBranchPatterns returns the built-in names plus any configured
-// patterns. The env var is authoritative when present (the broker always
-// sets it), so an in-sandbox invocation can never fall through to a file;
-// when absent — run by hand on the host — only the host-global config is
-// consulted, never the project-local .bwai.json.
-func protectedBranchPatterns() ([]string, error) {
-	pats := append([]string(nil), defaultProtectedBranches...)
-	var extra []string
-	if v, ok := os.LookupEnv(protectedBranchesEnv); ok {
-		if v != "" {
-			extra = strings.Split(v, "\n")
-		}
-	} else {
-		cfg, err := loadConfig(defaultConfigPath())
-		if err != nil {
-			return nil, err
-		}
-		extra = cfg.Broker.ProtectedBranches
-	}
-	return append(pats, extra...), nil
+// protectedBranchPatterns returns the built-in names plus the remote's own
+// patterns. The built-ins are always in force, so a config mistake cannot
+// open the canonical branches.
+func protectedBranchPatterns(r AllowedRemote) []string {
+	return append(append([]string(nil), defaultProtectedBranches...), r.ProtectedBranches...)
 }
 
-// branchProtected reports whether branch matches any pattern. A pattern with
-// no metacharacters is an exact match; otherwise it is a shell glob matched
-// with path.Match, whose "*" stops at "/" — so "release/*" covers
-// release/1.0 but not release/1.0/x, and "release-*" covers release-1.0.
-func branchProtected(branch string, patterns []string) bool {
+// matchesAny reports whether a branch or tag name matches any pattern. A
+// pattern with no metacharacters is an exact match; otherwise it is a shell
+// glob matched with path.Match, whose "*" stops at "/" — so "release/*"
+// covers release/1.0 but not release/1.0/x, and "release-*" covers
+// release-1.0.
+func matchesAny(name string, patterns []string) bool {
 	for _, p := range patterns {
-		if p == branch {
+		if p == name {
 			return true
 		}
-		if ok, err := path.Match(p, branch); err == nil && ok {
+		if ok, err := path.Match(p, name); err == nil && ok {
 			return true
 		}
 	}
 	return false
+}
+
+// fetchFromRepo copies ref from the agent's repository into the mirror as
+// dst. safe.directory is scoped to this fetch: it lets upload-pack serve a
+// repository owned by another user (the agent box), and upload-pack reads
+// that repository without executing anything from it. --update-shallow
+// accepts a ref from a shallow clone; without it git drops the ref with only
+// a warning and still exits 0.
+func fetchFromRepo(mirror string, repo *hostRepo, ref, dst string) (string, error) {
+	return mirrorGit(mirror,
+		"-c", "safe.directory="+repo.commonDir,
+		"-c", "safe.directory="+repo.workTree,
+		"-c", "transfer.fsckObjects=true",
+		"fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--update-shallow",
+		repo.commonDir, "+"+ref+":"+dst)
 }
 
 // mirrorGit runs git in the host-owned mirror and returns its combined

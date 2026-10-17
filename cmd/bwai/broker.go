@@ -598,14 +598,13 @@ func (b *Broker) execAndStream(enc *json.Encoder, req brokerRequest, matchIdx in
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
-	// Hand the git-safe push its allowlist from this broker's in-memory
+	// Hand git-safe its allowlist from this broker's in-memory
 	// config. It is set unconditionally (empty included) so a stray host
 	// environment value can never widen it.
 	if len(req.Argv) > 0 && req.Argv[0] == "git-safe" {
 		cfg := b.conf()
 		cmd.Env = append(cmd.Env,
-			pushAllowedEnv+"="+strings.Join(cfg.PushAllowedURLs, "\n"),
-			protectedBranchesEnv+"="+strings.Join(cfg.ProtectedBranches, "\n"),
+			allowedRemotesEnv+"="+allowedRemotesJSON(cfg.AllowedRemotes),
 			requestCwdEnv+"="+req.Cwd,
 			allowedRootsEnv+"="+strings.Join(b.resolvedRoots(), "\n"),
 		)
@@ -1039,4 +1038,11 @@ func peerUID(conn net.Conn) (int, error) {
 
 func isClosedConn(err error) bool {
 	return errors.Is(err, net.ErrClosed)
+}
+
+// allowedRemotesJSON encodes the allowlist for allowedRemotesEnv. It holds
+// only strings, so Marshal cannot fail.
+func allowedRemotesJSON(r []AllowedRemote) string {
+	b, _ := json.Marshal(r)
+	return string(b)
 }

@@ -401,3 +401,55 @@ func TestLoadConfigWebDefaults(t *testing.T) {
 		t.Errorf("web.addr = %q, want default %q", cfg.Broker.Web.Addr, defaultWebAddr)
 	}
 }
+
+// TestLoadLayeredConfigReplacesAllowedRemotes guards the trust anchor: a
+// local entry must not inherit tag_patterns or protected_branches it omits
+// from the base entry decoded at the same index.
+func TestLoadLayeredConfigReplacesAllowedRemotes(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.json")
+	local := filepath.Join(dir, "local.json")
+	writeFile(t, base, `{"broker":{"allowed_remotes":[`+
+		`{"url":"git@github.com:o/a.git","tag_patterns":["v*"],"protected_branches":["release-*"]}]}}`)
+	writeFile(t, local, `{"broker":{"allowed_remotes":[{"url":"git@github.com:o/b.git"}]}}`)
+
+	cfg, err := loadLayeredConfig(base, local)
+	if err != nil {
+		t.Fatalf("loadLayeredConfig: %v", err)
+	}
+	want := []AllowedRemote{{URL: "git@github.com:o/b.git"}}
+	if !reflect.DeepEqual(cfg.Broker.AllowedRemotes, want) {
+		t.Fatalf("allowed_remotes = %+v, want %+v", cfg.Broker.AllowedRemotes, want)
+	}
+}
+
+func TestLoadConfigAllowedRemotes(t *testing.T) {
+	cases := []struct {
+		name       string
+		json       string
+		wantErrSub string
+	}{
+		{"valid", `{"broker":{"allowed_remotes":[{"url":"git@github.com:o/a.git","tag_patterns":["v*"]}]}}`, ""},
+		{"missing url", `{"broker":{"allowed_remotes":[{"tag_patterns":["v*"]}]}}`, "url is required"},
+		{"same repository twice", `{"broker":{"allowed_remotes":[{"url":"git@github.com:o/a.git"},{"url":"https://github.com/o/a"}]}}`, "listed twice"},
+		{"legacy push_allowed_urls", `{"broker":{"push_allowed_urls":["git@github.com:o/a.git"]}}`, "allowed_remotes"},
+		{"legacy protected_branches", `{"broker":{"protected_branches":["release-*"]}}`, "allowed_remotes"},
+		{"legacy tag_patterns", `{"broker":{"tag_patterns":["v*"]}}`, "allowed_remotes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "bwai.json")
+			writeFile(t, path, tc.json)
+			_, err := loadConfig(path)
+			if tc.wantErrSub == "" {
+				if err != nil {
+					t.Fatalf("loadConfig: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("err = %v, want containing %q", err, tc.wantErrSub)
+			}
+		})
+	}
+}

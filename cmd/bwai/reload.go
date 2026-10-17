@@ -78,7 +78,7 @@ func (b *Broker) reloadSession(cfg BrokerConfig) {
 // file that was applied and has since stopped being trusted (edited
 // without a new `bwai trust`) keeps the previous config rather than
 // falling back to the global one: a local file may narrow
-// push_allowed_urls, so dropping it could widen the session.
+// allowed_remotes, so dropping it could widen the session.
 func sessionReloader(b *Broker, configPath, localPath string, wasApplied bool, applied func(BrokerConfig)) func() (string, error) {
 	return func() (string, error) {
 		cfg, state, err := loadProjectConfig(configPath, localPath)

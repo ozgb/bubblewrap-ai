@@ -57,7 +57,10 @@ sudo -u agent scripts/agent-box/setup-agent.sh ~/.local/bin/bwai
 ```
 
 Then add a `serve` block to `~/.config/bwai/bwai.json`. The rules and
-`push_allowed_urls` are the same ones a sandbox would use:
+`allowed_remotes` are the same ones a sandbox would use. The daemon
+reads only this file, never a project's `.bwai.json` — the work tree is
+the agent's to write — so every repository's policy goes in its
+`allowed_remotes` entry here:
 
 ```json
 {
@@ -68,11 +71,15 @@ Then add a `serve` block to `~/.config/bwai/bwai.json`. The rules and
       "allowed_uids": [1001],
       "roots": ["/var/home/agent/work"]
     },
-    "push_allowed_urls": ["git@github.com:you/project.git"],
+    "allowed_remotes": [
+      { "url": "git@github.com:you/project.git", "tag_patterns": ["v*"] },
+      { "url": "git@github.com:you/other.git", "protected_branches": ["release/*"] }
+    ],
     "rules": [
       { "match": ["git-sign"],              "action": "auto_allow" },
-      { "match": ["git-safe", "push", "**"], "action": "auto_allow" },
-      { "match": ["git-safe", "**"],         "action": "auto_deny" },
+      { "match": ["git-safe", "push", "**"],     "action": "auto_allow" },
+      { "match": ["git-safe", "push-tag", "**"], "action": "auto_allow" },
+      { "match": ["git-safe", "**"],             "action": "auto_deny" },
       { "match": ["gh-safe", "-R", "you/project", "**"], "action": "auto_allow" }
     ]
   }
@@ -145,7 +152,7 @@ path, so `~/work` qualifies.
   checks the request cwd and confines `git-safe push`'s git dir.
 - **Hot reload.** The daemon notices when its config file changes
   (checked every two seconds) and applies it to requests that start
-  afterwards: rules, `push_allowed_urls`, `protected_branches`,
+  afterwards: rules, `allowed_remotes`,
   `allowed_uids`, `roots`, the approval timeout. `systemctl --user reload
   bwai-broker` forces it. A file that fails to parse or validate is
   logged and the previous config stays in force. Moving `serve.socket`
