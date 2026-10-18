@@ -77,6 +77,14 @@ func TestGhSafeCalls(t *testing.T) {
 				{"api", "--silent", "-X", "POST", "repos/" + repo + "/issues/63/sub_issues", "-F", "sub_issue_id=4242"},
 			},
 		},
+		{
+			name: "remove-sub deletes by the child's id",
+			args: []string{"remove-sub", "63", "70"},
+			want: [][]string{
+				{"api", "repos/" + repo + "/issues/70", "--jq", ".id"},
+				{"api", "--silent", "-X", "DELETE", "repos/" + repo + "/issues/63/sub_issue", "-F", "sub_issue_id=4242"},
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

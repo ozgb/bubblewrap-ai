@@ -431,7 +431,7 @@ The rule needs a trailing `**` for the optional remote name, but the wrapper is 
 Issue dependencies and sub-issues are only reachable through `gh api`, and its endpoint is a single token with the issue number inside, so no rule can pin it to one repository short of `gh api **`. `gh-safe` is a third persona, built like `git-safe`, that builds the endpoint on the host from a closed argv:
 
 ```sh
-gh-safe -R owner/repo blocked-by 63      # also: block N BLOCKER, unblock N BLOCKER, sub-issues N, add-sub PARENT CHILD
+gh-safe -R owner/repo blocked-by 63      # also: block N BLOCKER, unblock N BLOCKER, sub-issues N, add-sub PARENT CHILD, remove-sub PARENT CHILD
 ```
 
 ```json

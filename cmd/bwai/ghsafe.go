@@ -20,6 +20,7 @@ Usage:
   gh-safe -R <owner/repo> unblock <issue> <blocker>    Remove that dependency
   gh-safe -R <owner/repo> sub-issues <issue>           Sub-issues of <issue>
   gh-safe -R <owner/repo> add-sub <parent> <child>     Make <child> a sub-issue of <parent>
+  gh-safe -R <owner/repo> remove-sub <parent> <child>  Detach <child> from <parent>
 
 -R comes first and is required. Issues are plain numbers. Nothing else is
 accepted, and nothing is passed through to gh.
@@ -82,6 +83,18 @@ var ghSafeOps = map[string]ghSafeOp{
 			return err
 		}
 		fmt.Fprintf(g.out, "#%s is now a sub-issue of #%s\n", n[1], n[0])
+		return nil
+	}},
+	"remove-sub": {2, func(g ghAPI, repo string, n []string) error {
+		id, err := g.issueID(repo, n[1])
+		if err != nil {
+			return err
+		}
+		// Singular sub_issue: GitHub's removal endpoint differs from the add/list one.
+		if err := g.write("DELETE", "repos/"+repo+"/issues/"+n[0]+"/sub_issue", "sub_issue_id="+id); err != nil {
+			return err
+		}
+		fmt.Fprintf(g.out, "#%s is no longer a sub-issue of #%s\n", n[1], n[0])
 		return nil
 	}},
 }

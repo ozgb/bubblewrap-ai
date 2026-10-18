@@ -557,8 +557,8 @@ which is every endpoint and every method.
 the sandbox, and a `bwai gh-safe` subcommand on the host that builds the
 endpoint itself. Its surface is closed: `-R owner/repo` first, then one of
 `blocked-by N`, `block N BLOCKER`, `unblock N BLOCKER`, `sub-issues N`,
-`add-sub PARENT CHILD`, with issues as plain numbers and nothing passed
-through to `gh`. Because the repository is a whole token, the rule can pin
+`add-sub PARENT CHILD`, `remove-sub PARENT CHILD`, with issues as plain
+numbers and nothing passed through to `gh`. Because the repository is a whole token, the rule can pin
 it:
 
 ```json

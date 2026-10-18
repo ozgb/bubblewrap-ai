@@ -749,6 +749,7 @@ gh-safe -R owner/repo block 63 12          # #63 is blocked by #12
 gh-safe -R owner/repo unblock 63 12
 gh-safe -R owner/repo sub-issues 63
 gh-safe -R owner/repo add-sub 63 70        # #70 becomes a sub-issue of #63
+gh-safe -R owner/repo remove-sub 63 70
 ` + "```" + `
 
 Run directly (do *not* prefix with ` + "`bwai-outside`" + `) for ordinary work —
